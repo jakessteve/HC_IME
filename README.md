@@ -4,6 +4,8 @@ HC_IME is a Linux-first Vietnamese input method for Fcitx5. The project is
 split into a Rust composition engine and a thin C++ addon that exposes the
 engine through the native Fcitx5 runtime.
 
+For the current validated project snapshot, see [docs/STATUS.md](docs/STATUS.md).
+
 The goal is to keep the typing logic auditable while still behaving like a real
 desktop input method:
 
