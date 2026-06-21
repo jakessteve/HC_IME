@@ -1,0 +1,20 @@
+# Local build outputs
+/build/
+/build-*/
+/hc_core/target/
+
+# Local Codex/OpenCode workspace state
+/.opencode/
+
+# Common generated files
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# CMake and compiler detritus that may appear outside build trees
+compile_commands.json
+cmake-build-*/
