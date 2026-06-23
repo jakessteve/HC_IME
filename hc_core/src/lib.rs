@@ -1127,4 +1127,52 @@ mod tests {
         assert_eq!(type_raw(session, &mut req, "may2"), "mày");
         hc_session_free(session);
     }
+
+    #[test]
+    fn tone_after_qu_glide_goes_to_main_vowel() {
+        let session = hc_session_new(InputMode::Telex as i32, 0);
+        let mut req = key_request(InputMode::Telex);
+
+        assert_eq!(type_raw(session, &mut req, "quas"), "quá");
+        hc_session_reset(session);
+        assert_eq!(type_raw(session, &mut req, "quis"), "quí");
+        hc_session_reset(session);
+        assert_eq!(type_raw(session, &mut req, "ques"), "qué");
+
+        hc_session_free(session);
+
+        let session = hc_session_new(InputMode::Vni as i32, 0);
+        let mut req = key_request(InputMode::Vni);
+
+        assert_eq!(type_raw(session, &mut req, "qua1"), "quá");
+        hc_session_reset(session);
+        assert_eq!(type_raw(session, &mut req, "qui1"), "quí");
+
+        hc_session_free(session);
+    }
+
+    #[test]
+    fn tone_after_gi_glide_goes_to_main_vowel() {
+        let session = hc_session_new(InputMode::Telex as i32, 0);
+        let mut req = key_request(InputMode::Telex);
+
+        assert_eq!(type_raw(session, &mut req, "giar"), "giả");
+        hc_session_reset(session);
+        assert_eq!(type_raw(session, &mut req, "gias"), "giá");
+        hc_session_reset(session);
+        assert_eq!(type_raw(session, &mut req, "giof"), "giò");
+        hc_session_reset(session);
+        assert_eq!(type_raw(session, &mut req, "gior"), "giỏ");
+
+        hc_session_free(session);
+
+        let session = hc_session_new(InputMode::Vni as i32, 0);
+        let mut req = key_request(InputMode::Vni);
+
+        assert_eq!(type_raw(session, &mut req, "gia3"), "giả");
+        hc_session_reset(session);
+        assert_eq!(type_raw(session, &mut req, "gia1"), "giá");
+
+        hc_session_free(session);
+    }
 }

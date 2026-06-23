@@ -197,11 +197,31 @@ pub fn apply_tone(buffer: &mut String, tone: Tone, legacy_tone: bool) -> bool {
 }
 
 fn tone_target_index(chars: &[char], legacy_tone: bool) -> Option<usize> {
-    let vowels: Vec<usize> = chars
+    let mut vowels: Vec<usize> = chars
         .iter()
         .enumerate()
         .filter_map(|(idx, ch)| is_vowel(*ch).then_some(idx))
         .collect();
+
+    // In Vietnamese orthography, 'q' is always followed by 'u' as a glide,
+    // and 'i' after 'g' is a glide when another vowel follows.
+    // The tone mark belongs on the vowel after the glide.
+    if vowels.len() >= 2
+        && vowels[0] > 0
+        && matches!(chars[vowels[0]], 'u' | 'U')
+        && matches!(chars[vowels[0] - 1], 'q' | 'Q')
+    {
+        vowels.remove(0);
+    }
+
+    if vowels.len() >= 2
+        && vowels[0] > 0
+        && matches!(chars[vowels[0]], 'i' | 'I')
+        && matches!(chars[vowels[0] - 1], 'g' | 'G')
+    {
+        vowels.remove(0);
+    }
+
     let &last = vowels.last()?;
     if vowels.len() == 1 {
         return Some(last);
