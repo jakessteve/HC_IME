@@ -103,6 +103,19 @@ pub enum InputMode {
     Viqr = 2,
 }
 
+impl TryFrom<i32> for InputMode {
+    type Error = HCErrorCode;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        Ok(match value {
+            0 => InputMode::Telex,
+            1 => InputMode::Vni,
+            2 => InputMode::Viqr,
+            _ => return Err(HCErrorCode::InvalidInputMode),
+        })
+    }
+}
+
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditTrigger {

@@ -59,6 +59,24 @@ where
 
 pub fn apply_telex_w(buffer: &mut String) -> bool {
     let mut chars: Vec<char> = buffer.chars().collect();
+
+    let (has_u, has_o) =
+        chars
+            .iter()
+            .fold((false, false), |(u, o), &ch| match vowel_signature(ch) {
+                Some((VowelFamily::PlainU, _, _)) => (true, o),
+                Some((VowelFamily::PlainO, _, _)) => (u, true),
+                _ => (u, o),
+            });
+
+    if has_u && has_o {
+        let changed = apply_horn_to_slice(&mut chars);
+        if changed {
+            *buffer = chars.into_iter().collect();
+            return true;
+        }
+    }
+
     for idx in (0..chars.len()).rev() {
         let replacement = match vowel_signature(chars[idx]) {
             Some((VowelFamily::PlainA, uppercase, tone)) => {
@@ -76,82 +94,72 @@ pub fn apply_telex_w(buffer: &mut String) -> bool {
             chars[idx] = replacement;
             *buffer = chars.into_iter().collect();
             return true;
+        }
+    }
+    false
+}
+
+fn apply_diacritic<F>(buffer: &mut String, mapper: F) -> bool
+where
+    F: Fn(VowelFamily) -> Option<VowelFamily>,
+{
+    let mut chars: Vec<char> = buffer.chars().collect();
+    for idx in (0..chars.len()).rev() {
+        if let Some((family, uppercase, tone)) = vowel_signature(chars[idx]) {
+            if let Some(new_family) = mapper(family) {
+                chars[idx] = compose_vowel(new_family, uppercase, tone);
+                *buffer = chars.into_iter().collect();
+                return true;
+            }
         }
     }
     false
 }
 
 pub fn apply_circumflex(buffer: &mut String) -> bool {
-    let mut chars: Vec<char> = buffer.chars().collect();
-    for idx in (0..chars.len()).rev() {
-        let replacement = match vowel_signature(chars[idx]) {
-            Some((VowelFamily::PlainA, uppercase, tone)) => {
-                Some(compose_vowel(VowelFamily::CircumflexA, uppercase, tone))
-            }
-            Some((VowelFamily::PlainE, uppercase, tone)) => {
-                Some(compose_vowel(VowelFamily::CircumflexE, uppercase, tone))
-            }
-            Some((VowelFamily::PlainO, uppercase, tone)) => {
-                Some(compose_vowel(VowelFamily::CircumflexO, uppercase, tone))
-            }
-            _ => None,
-        };
-        if let Some(replacement) = replacement {
-            chars[idx] = replacement;
-            *buffer = chars.into_iter().collect();
-            return true;
-        }
-    }
-    false
+    apply_diacritic(buffer, |f| match f {
+        VowelFamily::PlainA => Some(VowelFamily::CircumflexA),
+        VowelFamily::PlainE => Some(VowelFamily::CircumflexE),
+        VowelFamily::PlainO => Some(VowelFamily::CircumflexO),
+        _ => None,
+    })
 }
 
 pub fn apply_horn(buffer: &mut String) -> bool {
     let mut chars: Vec<char> = buffer.chars().collect();
-    for idx in 0..chars.len() {
-        let replacement = match vowel_signature(chars[idx]) {
+    if apply_horn_to_slice(&mut chars) {
+        *buffer = chars.into_iter().collect();
+        true
+    } else {
+        false
+    }
+}
+
+fn apply_horn_to_slice(chars: &mut [char]) -> bool {
+    let mut changed = false;
+    for ch in chars.iter_mut() {
+        let replacement = match vowel_signature(*ch) {
             Some((VowelFamily::PlainU, uppercase, tone)) => {
                 Some(compose_vowel(VowelFamily::HornU, uppercase, tone))
             }
-            _ => None,
-        };
-        if let Some(replacement) = replacement {
-            chars[idx] = replacement;
-            *buffer = chars.into_iter().collect();
-            return true;
-        }
-    }
-    for idx in (0..chars.len()).rev() {
-        let replacement = match vowel_signature(chars[idx]) {
             Some((VowelFamily::PlainO, uppercase, tone)) => {
                 Some(compose_vowel(VowelFamily::HornO, uppercase, tone))
             }
             _ => None,
         };
         if let Some(replacement) = replacement {
-            chars[idx] = replacement;
-            *buffer = chars.into_iter().collect();
-            return true;
+            *ch = replacement;
+            changed = true;
         }
     }
-    false
+    changed
 }
 
 pub fn apply_breve(buffer: &mut String) -> bool {
-    let mut chars: Vec<char> = buffer.chars().collect();
-    for idx in (0..chars.len()).rev() {
-        let replacement = match vowel_signature(chars[idx]) {
-            Some((VowelFamily::PlainA, uppercase, tone)) => {
-                Some(compose_vowel(VowelFamily::BreveA, uppercase, tone))
-            }
-            _ => None,
-        };
-        if let Some(replacement) = replacement {
-            chars[idx] = replacement;
-            *buffer = chars.into_iter().collect();
-            return true;
-        }
-    }
-    false
+    apply_diacritic(buffer, |f| match f {
+        VowelFamily::PlainA => Some(VowelFamily::BreveA),
+        _ => None,
+    })
 }
 
 pub fn apply_d_stroke(buffer: &mut String) -> bool {
@@ -176,16 +184,10 @@ pub fn apply_d_stroke(buffer: &mut String) -> bool {
 
 pub fn apply_tone(buffer: &mut String, tone: Tone, legacy_tone: bool) -> bool {
     let mut chars: Vec<char> = buffer.chars().collect();
-    let vowels: Vec<usize> = chars
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, ch)| is_vowel(*ch).then_some(idx))
-        .collect();
-    if vowels.is_empty() {
-        return false;
-    }
-
-    let target = tone_target_index(&chars, legacy_tone).unwrap_or(*vowels.last().unwrap());
+    let target = match tone_target_index(&chars, legacy_tone) {
+        Some(idx) => idx,
+        None => return false,
+    };
     let base = chars[target];
     let next = apply_tone_to_char(base, tone);
     if next == base {
@@ -203,12 +205,21 @@ fn tone_target_index(chars: &[char], legacy_tone: bool) -> Option<usize> {
         .filter_map(|(idx, ch)| is_vowel(*ch).then_some(idx))
         .collect();
 
+    let &last = vowels.last()?;
+    if vowels.len() == 1 {
+        return Some(last);
+    }
+
+    if legacy_tone {
+        return vowels.first().copied();
+    }
+
     // In Vietnamese orthography, 'q' is always followed by 'u' as a glide,
     // and 'i' after 'g' is a glide when another vowel follows.
-    // The tone mark belongs on the vowel after the glide.
+    // The modern tone mark belongs on the vowel after the glide.
     if vowels.len() >= 2
         && vowels[0] > 0
-        && matches!(chars[vowels[0]], 'u' | 'U')
+        && base_char(chars[vowels[0]]) == 'u'
         && matches!(chars[vowels[0] - 1], 'q' | 'Q')
     {
         vowels.remove(0);
@@ -216,7 +227,7 @@ fn tone_target_index(chars: &[char], legacy_tone: bool) -> Option<usize> {
 
     if vowels.len() >= 2
         && vowels[0] > 0
-        && matches!(chars[vowels[0]], 'i' | 'I')
+        && base_char(chars[vowels[0]]) == 'i'
         && matches!(chars[vowels[0] - 1], 'g' | 'G')
     {
         vowels.remove(0);
@@ -225,10 +236,6 @@ fn tone_target_index(chars: &[char], legacy_tone: bool) -> Option<usize> {
     let &last = vowels.last()?;
     if vowels.len() == 1 {
         return Some(last);
-    }
-
-    if legacy_tone {
-        return vowels.first().copied();
     }
 
     for preferred in [
@@ -255,7 +262,7 @@ fn tone_target_index(chars: &[char], legacy_tone: bool) -> Option<usize> {
         }
         "oa" | "oe" | "uy" => return vowels.last().copied(),
         "ie" | "ye" | "uo" | "uye" => return vowels.last().copied(),
-        "oai" | "uai" | "uay" | "uoi" | "ieu" | "yeu" => {
+        "oai" | "uai" | "uay" | "oay" | "uoi" | "ieu" | "yeu" => {
             return vowels.get(1).copied().or_else(|| vowels.last().copied());
         }
         _ => {}

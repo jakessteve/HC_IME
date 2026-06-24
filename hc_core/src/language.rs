@@ -6,6 +6,17 @@ use std::sync::OnceLock;
 use crate::types::{ContextSegment, InputMode, LanguageScores, SegmentKind, Tone};
 use crate::vowel::{has_vietnamese_mark, strip_marks_ascii_lower, vowel_signature};
 
+const SCORE_SPELLCHECK_VI: i32 = 3;
+const SCORE_DICT_VI: i32 = 4;
+const SCORE_MARK_VI: i32 = 2;
+const SCORE_TERMINAL_TRIGGER: i32 = 4;
+const SCORE_NON_ASCII: i32 = 3;
+const SCORE_DICT_EN: i32 = 8;
+const SCORE_ENGLISH_SUFFIX: i32 = 2;
+const SCORE_CODE_SHAPE: i32 = 5;
+const SCORE_INVALID_KEY: i32 = 4;
+const SCORE_ASCII_ALPHA: i32 = 1;
+
 pub fn language_scores(
     raw: &str,
     rendered: &str,
@@ -21,37 +32,37 @@ pub fn language_scores(
     let mut english = 0;
 
     if !spell_check {
-        vietnamese += 2;
+        vietnamese += SCORE_MARK_VI;
     } else if is_valid_vietnamese_word(rendered) {
-        vietnamese += 3;
+        vietnamese += SCORE_SPELLCHECK_VI;
     }
     if spell_check && is_dictionary_vietnamese_word(&rendered_key) {
-        vietnamese += 4;
+        vietnamese += SCORE_DICT_VI;
     }
     if has_vietnamese_mark(rendered) {
-        vietnamese += 2;
+        vietnamese += SCORE_MARK_VI;
     }
     if is_terminal_vietnamese_trigger(raw, mode) {
-        vietnamese += 4;
+        vietnamese += SCORE_TERMINAL_TRIGGER;
     }
     if !raw.is_ascii() {
-        vietnamese += 3;
+        vietnamese += SCORE_NON_ASCII;
     }
 
     if is_known_english_word(&raw_lower) {
-        english += 8;
+        english += SCORE_DICT_EN;
     }
     if has_english_suffix(&raw_lower) {
-        english += 2;
+        english += SCORE_ENGLISH_SUFFIX;
     }
     if has_code_shape(raw, mode) {
-        english += 5;
+        english += SCORE_CODE_SHAPE;
     }
     if spell_check && !raw_shape_key.is_empty() && !is_valid_vietnamese_key(&raw_shape_key) {
-        english += 4;
+        english += SCORE_INVALID_KEY;
     }
     if rendered != raw && raw.chars().all(|ch| ch.is_ascii_alphabetic()) {
-        english += 1;
+        english += SCORE_ASCII_ALPHA;
     }
 
     LanguageScores {

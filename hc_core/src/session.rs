@@ -26,6 +26,7 @@ pub struct Session {
     pub previous_buffer: String,
     pub previous_raw_buffer: String,
     pub last_spell_check_status: HCSpellCheckStatus,
+    rendered_raw_len: usize,
 }
 
 impl Session {
@@ -44,6 +45,7 @@ impl Session {
             previous_buffer: String::new(),
             previous_raw_buffer: String::new(),
             last_spell_check_status: HCSpellCheckStatus::Valid,
+            rendered_raw_len: 0,
         }
     }
 
@@ -56,11 +58,21 @@ impl Session {
         self.last_commit_time = None;
         self.previous_buffer.clear();
         self.previous_raw_buffer.clear();
+        self.rendered_raw_len = 0;
     }
 
     pub fn render_from_raw(&mut self) {
         self.save_state_for_undo();
-        self.buffer = render_raw_input(&self.raw_buffer, self.mode, self.legacy_tone);
+        let raw_len = self.raw_buffer.len();
+        if raw_len == self.rendered_raw_len + 1 {
+            let last_char = self.raw_buffer.chars().last().unwrap();
+            if !apply_input_trigger(&mut self.buffer, self.mode, last_char, self.legacy_tone) {
+                self.buffer.push(last_char);
+            }
+        } else {
+            self.buffer = render_raw_input(&self.raw_buffer, self.mode, self.legacy_tone);
+        }
+        self.rendered_raw_len = raw_len;
         self.update_spell_check_status();
     }
 
