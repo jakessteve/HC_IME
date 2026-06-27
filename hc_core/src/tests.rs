@@ -1,5 +1,6 @@
 use super::test_helpers::*;
 use super::*;
+use std::ptr;
 
 #[test]
 fn telex_simple_tone_and_cancel() {
@@ -742,6 +743,43 @@ fn telex_w_applies_breve_when_no_uo_pair() {
     assert_eq!(type_raw(session, &mut req, "uw"), "ư");
     hc_session_reset(session);
     assert_eq!(type_raw(session, &mut req, "hoanw"), "hoăn");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn backspace_deletes_single_base_char_with_trigger_together() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+
+    assert_eq!(type_raw(session, &mut req, "u7"), "ư");
+    req.kind = HCKeyKind::Backspace as i32;
+    req.text = ptr::null();
+    let back = hc_session_handle_key(session, &req);
+    assert_eq!(back.handled, 1);
+    assert_eq!(read_and_free(back.state), "");
+
+    hc_session_free(session);
+
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+
+    assert_eq!(type_raw(session, &mut req, "uw"), "ư");
+    req.kind = HCKeyKind::Backspace as i32;
+    req.text = ptr::null();
+    let back = hc_session_handle_key(session, &req);
+    assert_eq!(read_and_free(back.state), "");
+
+    hc_session_free(session);
+
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+
+    assert_eq!(type_raw(session, &mut req, "phuong7"), "phương");
+    req.kind = HCKeyKind::Backspace as i32;
+    req.text = ptr::null();
+    let back = hc_session_handle_key(session, &req);
+    assert_eq!(read_and_free(back.state), "phuong");
 
     hc_session_free(session);
 }

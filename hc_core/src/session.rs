@@ -27,6 +27,7 @@ pub struct Session {
     pub previous_raw_buffer: String,
     pub last_spell_check_status: HCSpellCheckStatus,
     rendered_raw_len: usize,
+    previous_rendered_raw_len: usize,
 }
 
 impl Session {
@@ -46,6 +47,7 @@ impl Session {
             previous_raw_buffer: String::new(),
             last_spell_check_status: HCSpellCheckStatus::Valid,
             rendered_raw_len: 0,
+            previous_rendered_raw_len: 0,
         }
     }
 
@@ -58,7 +60,9 @@ impl Session {
         self.last_commit_time = None;
         self.previous_buffer.clear();
         self.previous_raw_buffer.clear();
+        self.rendered_raw_len = self.previous_rendered_raw_len;
         self.rendered_raw_len = 0;
+        self.previous_rendered_raw_len = 0;
     }
 
     pub fn render_from_raw(&mut self) {
@@ -157,6 +161,7 @@ impl Session {
     pub fn save_state_for_undo(&mut self) {
         self.previous_buffer = self.buffer.clone();
         self.previous_raw_buffer = self.raw_buffer.clone();
+        self.previous_rendered_raw_len = self.rendered_raw_len;
     }
 
     pub fn undo(&mut self) -> bool {
@@ -167,6 +172,7 @@ impl Session {
         self.raw_buffer = self.previous_raw_buffer.clone();
         self.previous_buffer.clear();
         self.previous_raw_buffer.clear();
+        self.rendered_raw_len = self.previous_rendered_raw_len;
         true
     }
 
@@ -302,5 +308,16 @@ pub fn resolve_commit_text(
             text: rendered.to_string(),
             status: HCStatusFlag::Commit,
         }
+    }
+}
+
+pub fn is_raw_trigger(ch: char, mode: InputMode) -> bool {
+    match mode {
+        InputMode::Telex => matches!(
+            ch,
+            's' | 'S' | 'f' | 'F' | 'r' | 'R' | 'x' | 'X' | 'j' | 'J' | 'w' | 'W' | 'z' | 'Z'
+        ),
+        InputMode::Vni => ch.is_ascii_digit(),
+        InputMode::Viqr => matches!(ch, '\'' | '`' | '?' | '~' | '.' | '^' | '+' | '('),
     }
 }

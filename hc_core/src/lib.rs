@@ -61,7 +61,10 @@ impl Session {
                 }
                 HCKeyKind::Backspace => {
                     if !self.raw_buffer.is_empty() {
-                        self.raw_buffer.pop();
+                        let last = self.raw_buffer.pop().unwrap();
+                        if session::is_raw_trigger(last, self.mode) && self.raw_buffer.len() == 1 {
+                            self.raw_buffer.pop();
+                        }
                         self.render_from_raw();
                         if self.raw_buffer.is_empty() {
                             self.reconversion_active = false;
