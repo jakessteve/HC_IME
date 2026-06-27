@@ -787,6 +787,49 @@ fn backspace_deletes_visible_char_in_vni_mode() {
     let back = hc_session_handle_key(session, &req);
     assert_eq!(read_and_free(back.state), "ph");
 
+    hc_session_reset(session);
+
+    // When the deleted vowel carries the VNI tone, the tone must not jump to
+    // the previous vowel before the visible character is removed.
+    assert_eq!(type_raw(session, &mut req, "phuong73"), "phưởng");
+    req.kind = HCKeyKind::Backspace as i32;
+    req.text = ptr::null();
+    let back = hc_session_handle_key(session, &req);
+    assert_eq!(read_and_free(back.state), "phưởn");
+
+    req.kind = HCKeyKind::Backspace as i32;
+    req.text = ptr::null();
+    let back = hc_session_handle_key(session, &req);
+    assert_eq!(read_and_free(back.state), "phưở");
+
+    req.kind = HCKeyKind::Backspace as i32;
+    req.text = ptr::null();
+    let back = hc_session_handle_key(session, &req);
+    assert_eq!(read_and_free(back.state), "phư");
+
+    req.kind = HCKeyKind::Backspace as i32;
+    req.text = ptr::null();
+    let back = hc_session_handle_key(session, &req);
+    assert_eq!(read_and_free(back.state), "ph");
+
+    hc_session_reset(session);
+
+    assert_eq!(type_raw(session, &mut req, "phuong37"), "phưởng");
+    req.kind = HCKeyKind::Backspace as i32;
+    req.text = ptr::null();
+    let back = hc_session_handle_key(session, &req);
+    assert_eq!(read_and_free(back.state), "phưởn");
+
+    req.kind = HCKeyKind::Backspace as i32;
+    req.text = ptr::null();
+    let back = hc_session_handle_key(session, &req);
+    assert_eq!(read_and_free(back.state), "phưở");
+
+    req.kind = HCKeyKind::Backspace as i32;
+    req.text = ptr::null();
+    let back = hc_session_handle_key(session, &req);
+    assert_eq!(read_and_free(back.state), "phư");
+
     hc_session_free(session);
 }
 

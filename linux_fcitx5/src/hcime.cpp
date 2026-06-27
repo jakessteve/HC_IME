@@ -300,8 +300,12 @@ public:
         }
 
         if (isDeleteKey(event.key()) && state.hasActivePreedit) {
-            clearActivePreedit(event, state);
-            event.filterAndAccept();
+            if (mode == kInputModeVni) {
+                deleteActivePreeditCharacter(event, state, mode);
+            } else {
+                clearActivePreedit(event, state);
+                event.filterAndAccept();
+            }
             return;
         }
 
@@ -474,6 +478,40 @@ private:
         }
         state.hasActivePreedit = false;
         clearPreedit(event.inputContext());
+    }
+
+    void deleteActivePreeditCharacter(KeyEvent& event, ContextState& state, int32_t mode) {
+        if (state.session.ptr == nullptr) {
+            state.hasActivePreedit = false;
+            clearPreedit(event.inputContext());
+            event.filterAndAccept();
+            return;
+        }
+
+        HC_KeyRequest deleteRequest{
+            HC_KEY_BACKSPACE,
+            nullptr,
+            mode,
+            static_cast<uint8_t>(*config_.legacyTone),
+            static_cast<uint8_t>(*config_.spellCheck),
+            static_cast<uint8_t>(*config_.autoRestore),
+        };
+        HC_KeyResult deleteResult = hc_session_handle_key(state.session.ptr, &deleteRequest);
+        StateHandle deleteState{&deleteResult.state};
+        const std::string output = StateToUtf8(deleteResult.state);
+
+        if (deleteResult.handled == 0) {
+            return;
+        }
+
+        if (deleteResult.state.error_code < 0 || output.empty()) {
+            state.hasActivePreedit = false;
+            clearPreedit(event.inputContext());
+        } else {
+            state.hasActivePreedit = true;
+            setPreedit(event.inputContext(), output, *config_.displayUnderline, deleteResult.state.spell_check_status);
+        }
+        event.filterAndAccept();
     }
 
     void commitActivePreedit(KeyEvent& event, ContextState& state, int32_t mode) {

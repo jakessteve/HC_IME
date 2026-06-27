@@ -15,7 +15,7 @@ mod tests;
 pub use types::*;
 
 use language::is_known_english_word;
-use session::Session;
+use session::{render_raw_input, Session};
 use transform::{apply_circumflex, apply_telex_w, apply_tone_to_word};
 use vowel::strip_all_marks;
 
@@ -61,36 +61,14 @@ impl Session {
                 }
                 HCKeyKind::Backspace => {
                     if !self.raw_buffer.is_empty() {
-                        if self.raw_buffer.len() == 1 {
-                            self.raw_buffer.clear();
-                            self.render_from_raw();
-                            self.reconversion_active = false;
-                            return self.emit_preedit(true);
-                        }
                         match self.mode {
                             InputMode::Vni => {
-                                let mut pos = self.raw_buffer.len();
-                                for (i, ch) in self.raw_buffer.char_indices().rev() {
-                                    if !ch.is_ascii_digit() {
-                                        pos = i;
-                                        break;
-                                    }
-                                }
-                                if pos < self.raw_buffer.len() {
-                                    self.raw_buffer.remove(pos);
-                                    self.render_from_raw();
-                                    while let Some(last) = self.raw_buffer.chars().last() {
-                                        if !last.is_ascii_digit() {
-                                            break;
-                                        }
-                                        if self.buffer.ends_with(last) {
-                                            self.raw_buffer.pop();
-                                            self.render_from_raw();
-                                        } else {
-                                            break;
-                                        }
-                                    }
-                                }
+                                self.raw_buffer = vni_raw_after_visible_backspace(
+                                    &self.raw_buffer,
+                                    &self.buffer,
+                                    self.legacy_tone,
+                                );
+                                self.render_from_raw();
                             }
                             _ => {
                                 self.raw_buffer.pop();
@@ -190,6 +168,89 @@ impl Session {
             handled: 0,
         }
     }
+}
+
+fn vni_raw_after_visible_backspace(raw: &str, rendered: &str, legacy_tone: bool) -> String {
+    let mut target = rendered.to_string();
+    if target.pop().is_none() {
+        let mut fallback = raw.to_string();
+        fallback.pop();
+        return fallback;
+    }
+
+    let raw_chars: Vec<char> = raw.chars().collect();
+    for primary_idx in (0..raw_chars.len()).rev() {
+        let extra_digit_indices: Vec<usize> = ((primary_idx + 1)..raw_chars.len())
+            .filter(|&idx| raw_chars[idx].is_ascii_digit())
+            .collect();
+
+        if let Some(candidate) = matching_vni_backspace_candidate(
+            &raw_chars,
+            primary_idx,
+            &extra_digit_indices,
+            &target,
+            legacy_tone,
+        ) {
+            return candidate;
+        }
+    }
+
+    let mut fallback = raw.to_string();
+    fallback.pop();
+    fallback
+}
+
+fn matching_vni_backspace_candidate(
+    raw_chars: &[char],
+    primary_idx: usize,
+    extra_digit_indices: &[usize],
+    target: &str,
+    legacy_tone: bool,
+) -> Option<String> {
+    const MAX_EXTRA_DIGITS_FOR_EXACT_SEARCH: usize = 12;
+
+    if extra_digit_indices.len() > MAX_EXTRA_DIGITS_FOR_EXACT_SEARCH {
+        return candidate_if_matches(raw_chars, primary_idx, &[], target, legacy_tone);
+    }
+
+    let subset_count = 1usize << extra_digit_indices.len();
+    for removed_extra_count in 0..=extra_digit_indices.len() {
+        for mask in 0..subset_count {
+            if mask.count_ones() as usize != removed_extra_count {
+                continue;
+            }
+            let removed_extras: Vec<usize> = extra_digit_indices
+                .iter()
+                .enumerate()
+                .filter_map(|(bit, idx)| ((mask & (1usize << bit)) != 0).then_some(*idx))
+                .collect();
+            if let Some(candidate) =
+                candidate_if_matches(raw_chars, primary_idx, &removed_extras, target, legacy_tone)
+            {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
+fn candidate_if_matches(
+    raw_chars: &[char],
+    primary_idx: usize,
+    removed_extras: &[usize],
+    target: &str,
+    legacy_tone: bool,
+) -> Option<String> {
+    let candidate: String = raw_chars
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, ch)| {
+            (idx != primary_idx && !removed_extras.contains(&idx)).then_some(*ch)
+        })
+        .collect();
+
+    (render_raw_input(&candidate, InputMode::Vni, legacy_tone) == target).then_some(candidate)
 }
 
 #[no_mangle]

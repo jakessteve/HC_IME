@@ -90,6 +90,23 @@ int main() {
     require(ic.commits.empty(), "active delete does not commit text");
     require(ic.surroundingDeletes.empty(), "active delete does not request surrounding deletion");
 
+    MockInputContext vniIc(manager);
+    InputMethodEntry vniEntry("hcime-vni", "HC_IME VNI", "vi", "hcime");
+    require(send(engine, vniEntry, vniIc, FcitxKey_p), "vni p accepted");
+    require(send(engine, vniEntry, vniIc, FcitxKey_h), "vni h accepted");
+    require(send(engine, vniEntry, vniIc, FcitxKey_u), "vni u accepted");
+    require(send(engine, vniEntry, vniIc, FcitxKey_o), "vni o accepted");
+    require(send(engine, vniEntry, vniIc, FcitxKey_n), "vni n accepted");
+    require(send(engine, vniEntry, vniIc, FcitxKey_g), "vni g accepted");
+    require(send(engine, vniEntry, vniIc, FcitxKey_7), "vni horn accepted");
+    require(vniIc.inputPanel().clientPreedit().toString() == "phương", "vni preedit rendered");
+    require(send(engine, vniEntry, vniIc, FcitxKey_Delete), "vni active delete accepted");
+    require(vniIc.inputPanel().clientPreedit().toString() == "phươn", "vni delete removes final visible char");
+    require(send(engine, vniEntry, vniIc, FcitxKey_BackSpace), "vni active backspace accepted");
+    require(vniIc.inputPanel().clientPreedit().toString() == "phươ", "vni backspace removes n");
+    require(send(engine, vniEntry, vniIc, FcitxKey_BackSpace), "vni active backspace removes vowel");
+    require(vniIc.inputPanel().clientPreedit().toString() == "phư", "vni backspace removes whole horned o");
+
     require(send(engine, entry, ic, FcitxKey_BackSpace), "inactive backspace accepted");
     require(ic.forwards.size() == 1 && ic.forwards.back() == FcitxKey_BackSpace, "inactive backspace forwarded to client");
     require(ic.commits.empty(), "inactive backspace does not commit a control character");
