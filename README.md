@@ -9,7 +9,7 @@ For the current validated project snapshot, see [docs/STATUS.md](docs/STATUS.md)
 The goal is to keep the typing logic auditable while still behaving like a real
 desktop input method:
 
-- Telex, VNI, and VIQR input modes
+- Vietnamese composition in the Rust core
 - live preedit composition and commit handling
 - raw-keystroke replay for invalid or partially corrected sequences
 - Vietnamese syllable validation with spell-check fallback
@@ -36,7 +36,7 @@ graph TD
     P --> M
 
     E --> I[Installed Fcitx5 metadata]
-    I --> J[hcime.conf and per-mode entries]
+    I --> J[hcime.conf and the single HC_IME input-method entry]
     E --> D[Optional dictionaries]
     D --> DV[HC_IME_VI_DICT or Bamboo dictionary]
     D --> DE[HC_IME_EN_DICT or /usr/share/dict/words]
@@ -72,8 +72,7 @@ The Rust engine currently handles:
 The Fcitx5 addon currently provides:
 
 - one primary `HC_IME` input method
-- direct `HC_IME Telex`, `HC_IME VNI`, and `HC_IME VIQR` entries
-- a native configuration panel for input method and behavior toggles
+- a native configuration panel for behavior toggles and dictionary paths
 - status-area actions that mirror the same runtime switches
 
 ## Build
@@ -105,7 +104,6 @@ fcitx5-configtool
 
 The generated HC_IME settings panel includes:
 
-- `Input method`
 - `Use legacy tone placement`
 - `Validate Vietnamese words with dictionaries and rules`
 - `Restore invalid Vietnamese sequences to raw keystrokes`
@@ -145,7 +143,7 @@ The install rules place:
 - `libhcime.so` in the Fcitx5 addon directory
 - `libhc_core.so` alongside the addon for runtime loading
 - `hcime.conf` in the addon metadata directory
-- the per-mode inputmethod configs in the Fcitx5 inputmethod directory
+- a single `hcime.conf` inputmethod descriptor in the Fcitx5 inputmethod directory
 
 The top-level `.gitignore` keeps generated build trees, `hc_core/target`, and
 local tooling state out of the repository.

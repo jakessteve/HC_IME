@@ -17,8 +17,8 @@ cleanup and documentation sync.
   engine.
 - Tone placement, diacritic transforms, reconversion, and raw-keystroke replay
   are implemented in the Rust core.
-- The addon exposes configurable HC_IME, Telex, VNI, and VIQR entries.
-- Native Fcitx5 config controls input mode, legacy tone placement, spell check,
+- The addon exposes a single configurable HC_IME entry with behavior toggles.
+- Native Fcitx5 config controls legacy tone placement, spell check,
   auto-restore, underline behavior, and dictionary paths.
 - The smoke script verifies Rust tests, addon build/install, metadata, shared
   library resolution, and FFI exports.
