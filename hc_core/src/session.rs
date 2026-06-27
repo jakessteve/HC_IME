@@ -310,14 +310,3 @@ pub fn resolve_commit_text(
         }
     }
 }
-
-pub fn is_raw_trigger(ch: char, mode: InputMode) -> bool {
-    match mode {
-        InputMode::Telex => matches!(
-            ch,
-            's' | 'S' | 'f' | 'F' | 'r' | 'R' | 'x' | 'X' | 'j' | 'J' | 'w' | 'W' | 'z' | 'Z'
-        ),
-        InputMode::Vni => ch.is_ascii_digit(),
-        InputMode::Viqr => matches!(ch, '\'' | '`' | '?' | '~' | '.' | '^' | '+' | '('),
-    }
-}

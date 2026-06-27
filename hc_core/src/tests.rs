@@ -748,10 +748,11 @@ fn telex_w_applies_breve_when_no_uo_pair() {
 }
 
 #[test]
-fn backspace_deletes_single_base_char_with_trigger_together() {
+fn backspace_deletes_visible_char_in_vni_mode() {
     let session = hc_session_new(InputMode::Vni as i32, 0);
     let mut req = key_request(InputMode::Vni);
 
+    // Single base + trigger: backspace deletes entire composed char
     assert_eq!(type_raw(session, &mut req, "u7"), "ư");
     req.kind = HCKeyKind::Backspace as i32;
     req.text = ptr::null();
@@ -759,8 +760,38 @@ fn backspace_deletes_single_base_char_with_trigger_together() {
     assert_eq!(back.handled, 1);
     assert_eq!(read_and_free(back.state), "");
 
-    hc_session_free(session);
+    hc_session_reset(session);
 
+    // Multi-char base + trigger: backspace deletes last visible char
+    assert_eq!(type_raw(session, &mut req, "phuong7"), "phương");
+    req.kind = HCKeyKind::Backspace as i32;
+    req.text = ptr::null();
+    let back = hc_session_handle_key(session, &req);
+    assert_eq!(read_and_free(back.state), "phươn");
+
+    // Second backspace deletes 'n'
+    req.kind = HCKeyKind::Backspace as i32;
+    req.text = ptr::null();
+    let back = hc_session_handle_key(session, &req);
+    assert_eq!(read_and_free(back.state), "phươ");
+
+    // Third backspace deletes 'ơ'
+    req.kind = HCKeyKind::Backspace as i32;
+    req.text = ptr::null();
+    let back = hc_session_handle_key(session, &req);
+    assert_eq!(read_and_free(back.state), "phư");
+
+    // Fourth backspace deletes 'ư' (and its orphaned trigger)
+    req.kind = HCKeyKind::Backspace as i32;
+    req.text = ptr::null();
+    let back = hc_session_handle_key(session, &req);
+    assert_eq!(read_and_free(back.state), "ph");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn telex_backspace_deletes_one_raw_character() {
     let session = hc_session_new(InputMode::Telex as i32, 0);
     let mut req = key_request(InputMode::Telex);
 
@@ -768,18 +799,7 @@ fn backspace_deletes_single_base_char_with_trigger_together() {
     req.kind = HCKeyKind::Backspace as i32;
     req.text = ptr::null();
     let back = hc_session_handle_key(session, &req);
-    assert_eq!(read_and_free(back.state), "");
-
-    hc_session_free(session);
-
-    let session = hc_session_new(InputMode::Vni as i32, 0);
-    let mut req = key_request(InputMode::Vni);
-
-    assert_eq!(type_raw(session, &mut req, "phuong7"), "phương");
-    req.kind = HCKeyKind::Backspace as i32;
-    req.text = ptr::null();
-    let back = hc_session_handle_key(session, &req);
-    assert_eq!(read_and_free(back.state), "phuong");
+    assert_eq!(read_and_free(back.state), "u");
 
     hc_session_free(session);
 }
