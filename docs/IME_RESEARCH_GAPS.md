@@ -19,8 +19,7 @@ This note records the comparison that drove the current HC_IME upgrade.
 - No native config UI in `fcitx5-configtool`.
 - No user-visible toggles for spell checking, auto-restore, or legacy tone
   placement.
-- Telex/VNI/VIQR were exposed as separate input methods, which made the addon
-  surface broader than necessary.
+- Telex/VNI/VIQR were not selectable from the HC_IME entry itself.
 - Dictionary paths were implicit rather than visible/auditable.
 - No one-command E2E gate verifying config metadata, input methods, staged
   install, shared-library resolution, and FFI exports.
@@ -30,14 +29,15 @@ This note records the comparison that drove the current HC_IME upgrade.
 ## Upgrade Implemented
 
 - Added native Fcitx5 configuration for:
+  - Input mode selection: Telex, VNI, or VIQR
   - Legacy tone placement
   - Spell-check/dictionary validation
   - Auto-restore raw keystrokes for invalid Vietnamese sequences
   - Preedit underline
   - Vietnamese dictionary path
   - English dictionary path
-- Marked the addon configurable and collapsed the Fcitx5 surface to one
-  `HC_IME` input method.
+- Marked the addon configurable and kept one `HC_IME` input method with a
+  selectable input mode.
 - Added a Bamboo-like HC_IME status-area menu with runtime toggles.
 - Passed these config toggles into the Rust core through the FFI request.
 - Added tests for the config-controlled engine behavior.

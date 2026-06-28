@@ -104,6 +104,7 @@ fcitx5-configtool
 
 The generated HC_IME settings panel includes:
 
+- `Input mode`
 - `Use legacy tone placement`
 - `Validate Vietnamese words with dictionaries and rules`
 - `Restore invalid Vietnamese sequences to raw keystrokes`

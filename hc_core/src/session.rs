@@ -204,6 +204,14 @@ pub fn render_raw_input(raw: &str, mode: InputMode, legacy_tone: bool) -> String
     rendered
 }
 
+pub fn vni_digit_transforms_buffer(buffer: &str, ch: char, legacy_tone: bool) -> bool {
+    if !ch.is_ascii_digit() {
+        return false;
+    }
+    let mut probe = buffer.to_string();
+    apply_vni_trigger(&mut probe, ch, legacy_tone)
+}
+
 fn apply_input_trigger(buffer: &mut String, mode: InputMode, ch: char, legacy_tone: bool) -> bool {
     match mode {
         InputMode::Telex => apply_telex_trigger(buffer, ch, legacy_tone),

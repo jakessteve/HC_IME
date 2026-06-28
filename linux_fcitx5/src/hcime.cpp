@@ -74,10 +74,21 @@ struct StateHandle {
     StateHandle& operator=(const StateHandle&) = delete;
 };
 
+enum class HcImeInputMode {
+    Telex,
+    Vni,
+    Viqr,
+};
+
+FCITX_CONFIG_ENUM_NAME(HcImeInputMode, "Telex", "VNI", "VIQR");
+
 static constexpr int32_t kInputModeTelex = 0;
 static constexpr const char* kConfigPath = "conf/hcime.conf";
 
 enum class HcImeMenuItem {
+    ModeTelex,
+    ModeVni,
+    ModeViqr,
     LegacyTone,
     SpellCheck,
     AutoRestore,
@@ -86,6 +97,7 @@ enum class HcImeMenuItem {
 
 FCITX_CONFIGURATION(
     HcImeConfig,
+    Option<HcImeInputMode> inputMode{this, "InputMethod", "Input mode", HcImeInputMode::Telex};
     Option<bool> legacyTone{this, "LegacyTone", "Use legacy tone placement", false};
     Option<bool> spellCheck{this, "SpellCheck", "Validate Vietnamese words with dictionaries and rules", true};
     Option<bool> autoRestore{this, "AutoRestore", "Restore invalid Vietnamese sequences to raw keystrokes", true};
@@ -116,6 +128,30 @@ static bool IsControlUtf8(const std::string& utf8) {
     }
     const auto ch = static_cast<unsigned char>(utf8.front());
     return ch < 0x20 || ch == 0x7F;
+}
+
+static int32_t toSessionInputMode(HcImeInputMode mode) {
+    switch (mode) {
+        case HcImeInputMode::Telex:
+            return kInputModeTelex;
+        case HcImeInputMode::Vni:
+            return 1;
+        case HcImeInputMode::Viqr:
+            return 2;
+    }
+    return kInputModeTelex;
+}
+
+static const char* modeLabel(HcImeInputMode mode) {
+    switch (mode) {
+        case HcImeInputMode::Telex:
+            return "Telex";
+        case HcImeInputMode::Vni:
+            return "VNI";
+        case HcImeInputMode::Viqr:
+            return "VIQR";
+    }
+    return "Telex";
 }
 
 static bool IsPrintable(const Key& key, std::string& utf8) {
@@ -234,23 +270,26 @@ public:
     }
 
     void reloadConfig() override {
-        readAsIni(config_, StandardPathsType::Config, kConfigPath);
+        if (instance_ != nullptr) {
+            readAsIni(config_, StandardPathsType::Config, kConfigPath);
+        }
         applyRuntimeConfig();
         refreshStatusMenu();
     }
 
     void save() override {
-        safeSaveAsIni(config_, StandardPathsType::Config, kConfigPath);
+        if (instance_ != nullptr) {
+            safeSaveAsIni(config_, StandardPathsType::Config, kConfigPath);
+        }
     }
 
     void keyEvent(const InputMethodEntry& entry, KeyEvent& event) override {
         auto& state = stateFor(event.inputContext());
+        const int32_t mode = toSessionInputMode(*config_.inputMode);
 
         if (event.isRelease()) {
             return;
         }
-
-        const int32_t mode = kInputModeTelex;
 
         if (isUndoKey(event.key()) && state.hasActivePreedit) {
             HC_KeyRequest undoRequest{
@@ -374,7 +413,7 @@ public:
     void activate(const InputMethodEntry& entry, InputContextEvent& event) override {
         auto& state = stateFor(event.inputContext());
         if (state.session.ptr == nullptr) {
-            state.session.ptr = hc_session_new(kInputModeTelex, 0);
+            state.session.ptr = hc_session_new(toSessionInputMode(*config_.inputMode), 0);
         }
         attachStatusMenu(event.inputContext());
     }
@@ -400,7 +439,7 @@ public:
     }
 
     std::string subMode(const InputMethodEntry&, InputContext&) override {
-        return {};
+        return modeLabel(*config_.inputMode);
     }
 
 private:
@@ -517,6 +556,12 @@ private:
             return action;
         };
 
+        modeActions_[0] = addToggleAction("Telex", HcImeMenuItem::ModeTelex,
+                                           "Switch HC_IME input mode to Telex");
+        modeActions_[1] = addToggleAction("VNI", HcImeMenuItem::ModeVni,
+                                           "Switch HC_IME input mode to VNI");
+        modeActions_[2] = addToggleAction("VIQR", HcImeMenuItem::ModeViqr,
+                                            "Switch HC_IME input mode to VIQR");
         toggleActions_[0] = addToggleAction("Legacy tone placement", HcImeMenuItem::LegacyTone,
                                             "Toggle legacy tone placement");
         toggleActions_[1] = addToggleAction("Spell check", HcImeMenuItem::SpellCheck,
@@ -540,6 +585,9 @@ private:
 
     void registerStatusActions() {
         registerStatusAction("hcime-status", statusRootAction_.get());
+        registerStatusAction("hcime-mode-telex", modeActions_[0].get());
+        registerStatusAction("hcime-mode-vni", modeActions_[1].get());
+        registerStatusAction("hcime-mode-viqr", modeActions_[2].get());
         registerStatusAction("hcime-toggle-legacy-tone", toggleActions_[0].get());
         registerStatusAction("hcime-toggle-spell-check", toggleActions_[1].get());
         registerStatusAction("hcime-toggle-auto-restore", toggleActions_[2].get());
@@ -558,6 +606,9 @@ private:
     }
 
     void refreshStatusMenu() {
+        modeActions_[0]->setChecked(*config_.inputMode == HcImeInputMode::Telex);
+        modeActions_[1]->setChecked(*config_.inputMode == HcImeInputMode::Vni);
+        modeActions_[2]->setChecked(*config_.inputMode == HcImeInputMode::Viqr);
         toggleActions_[0]->setChecked(*config_.legacyTone);
         toggleActions_[1]->setChecked(*config_.spellCheck);
         toggleActions_[2]->setChecked(*config_.autoRestore);
@@ -567,6 +618,9 @@ private:
     void attachStatusMenu(InputContext* ic) {
         auto& statusArea = ic->statusArea();
         statusArea.clearGroup(StatusGroup::InputMethod);
+        for (const auto& action : modeActions_) {
+            statusArea.addAction(StatusGroup::InputMethod, action.get());
+        }
         for (const auto& action : toggleActions_) {
             statusArea.addAction(StatusGroup::InputMethod, action.get());
         }
@@ -575,6 +629,15 @@ private:
 
     void onMenuActivated(HcImeMenuItem item, InputContext* ic) {
         switch (item) {
+            case HcImeMenuItem::ModeTelex:
+                *config_.inputMode.mutableValue() = HcImeInputMode::Telex;
+                break;
+            case HcImeMenuItem::ModeVni:
+                *config_.inputMode.mutableValue() = HcImeInputMode::Vni;
+                break;
+            case HcImeMenuItem::ModeViqr:
+                *config_.inputMode.mutableValue() = HcImeInputMode::Viqr;
+                break;
             case HcImeMenuItem::LegacyTone:
                 *config_.legacyTone.mutableValue() = !*config_.legacyTone;
                 break;
@@ -592,6 +655,7 @@ private:
         applyRuntimeConfig();
         refreshStatusMenu();
         save();
+        resetAllSessions();
         if (ic != nullptr) {
             ic->reset();
             ic->updateUserInterface(UserInterfaceComponent::StatusArea, true);
@@ -686,6 +750,7 @@ private:
     HcImeConfig config_;
     std::unique_ptr<Menu> statusMenu_;
     std::unique_ptr<SimpleAction> statusRootAction_;
+    std::array<std::unique_ptr<SimpleAction>, 3> modeActions_;
     std::array<std::unique_ptr<SimpleAction>, 4> toggleActions_;
     std::vector<Connection> actionConnections_;
     std::vector<Action*> registeredActions_;

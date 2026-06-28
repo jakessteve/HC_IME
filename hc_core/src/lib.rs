@@ -15,7 +15,7 @@ mod tests;
 pub use types::*;
 
 use language::is_known_english_word;
-use session::{render_raw_input, Session};
+use session::{render_raw_input, vni_digit_transforms_buffer, Session};
 use transform::{apply_circumflex, apply_telex_w, apply_tone_to_word};
 use vowel::strip_all_marks;
 
@@ -137,16 +137,39 @@ impl Session {
                     };
 
                     self.reconversion_active = false;
-                    if text.chars().next().is_none() {
+                    let mut chars = text.chars();
+                    let Some(first_char) = chars.next() else {
                         return HC_KeyResult {
                             state: hc_error_state(HCErrorCode::InvalidUtf8),
                             handled: 0,
                         };
                     };
+                    let single_char = chars.next().is_none();
 
                     self.last_commit.clear();
                     self.last_raw.clear();
                     self.last_commit_time = None;
+
+                    if self.mode == InputMode::Vni && single_char && first_char.is_ascii_digit() {
+                        if self.buffer.is_empty() && self.raw_buffer.is_empty() {
+                            return HC_KeyResult {
+                                state: hc_error_state(HCErrorCode::None),
+                                handled: 0,
+                            };
+                        }
+
+                        if !vni_digit_transforms_buffer(&self.buffer, first_char, self.legacy_tone)
+                        {
+                            self.raw_buffer.push(first_char);
+                            self.buffer.push(first_char);
+                            let commit = self.commit_current();
+                            return HC_KeyResult {
+                                state: commit,
+                                handled: 1,
+                            };
+                        }
+                    }
+
                     self.raw_buffer.push_str(text);
                     self.render_from_raw();
                     return self.emit_preedit(true);

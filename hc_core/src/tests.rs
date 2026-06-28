@@ -89,13 +89,18 @@ fn vni_zero_is_literal_unless_it_cancels_marks() {
     let session = hc_session_new(InputMode::Vni as i32, 0);
     let mut req = key_request(InputMode::Vni);
 
-    assert_eq!(type_raw(session, &mut req, "10"), "10");
-    hc_session_reset(session);
-
-    assert_eq!(type_raw(session, &mut req, "1230"), "1230");
-    hc_session_reset(session);
+    for ch in ["1", "0", "1", "2", "3", "0"] {
+        let key = c(ch);
+        req.text = key.as_ptr();
+        let res = hc_session_handle_key(session, &req);
+        assert_eq!(res.handled, 0, "standalone VNI digit {ch} passes through");
+        assert_eq!(read_and_free(res.state), "");
+    }
 
     assert_eq!(type_raw(session, &mut req, "a0"), "a0");
+    let (committed, status) = commit_with_space(session, &mut req);
+    assert_eq!(committed, "");
+    assert_eq!(status, HCStatusFlag::InProgress as i32);
     hc_session_reset(session);
 
     assert_eq!(type_raw(session, &mut req, "a10"), "a");
