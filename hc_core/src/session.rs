@@ -215,10 +215,11 @@ fn apply_input_trigger(buffer: &mut String, mode: InputMode, ch: char, legacy_to
 fn apply_telex_trigger(buffer: &mut String, ch: char, legacy_tone: bool) -> bool {
     match ch {
         'z' | 'Z' => {
-            if buffer.is_empty() {
+            let stripped = strip_all_marks(buffer);
+            if stripped == buffer.as_str() {
                 false
             } else {
-                *buffer = strip_all_marks(buffer);
+                *buffer = stripped;
                 true
             }
         }
@@ -239,10 +240,11 @@ fn apply_telex_trigger(buffer: &mut String, ch: char, legacy_tone: bool) -> bool
 fn apply_vni_trigger(buffer: &mut String, ch: char, legacy_tone: bool) -> bool {
     match ch {
         '0' => {
-            if buffer.is_empty() {
+            let stripped = strip_all_marks(buffer);
+            if stripped == buffer.as_str() {
                 false
             } else {
-                *buffer = strip_all_marks(buffer);
+                *buffer = stripped;
                 true
             }
         }

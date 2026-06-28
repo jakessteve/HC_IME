@@ -34,6 +34,22 @@ fn telex_simple_tone_and_cancel() {
 }
 
 #[test]
+fn telex_z_is_literal_unless_it_cancels_marks() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+
+    assert_eq!(type_raw(session, &mut req, "az"), "az");
+    hc_session_reset(session);
+
+    assert_eq!(type_raw(session, &mut req, "asz"), "a");
+    let (committed, status) = commit_with_space(session, &mut req);
+    assert_eq!(committed, "a");
+    assert_eq!(status, HCStatusFlag::Commit as i32);
+
+    hc_session_free(session);
+}
+
+#[test]
 fn vni_triggers_and_literal_numbers() {
     let session = hc_session_new(InputMode::Vni as i32, 0);
     let t = c("t");
@@ -65,6 +81,32 @@ fn vni_triggers_and_literal_numbers() {
     req.text = seven.as_ptr();
     let res = hc_session_handle_key(session, &req);
     assert!(read_and_free(res.state).contains('ư'));
+    hc_session_free(session);
+}
+
+#[test]
+fn vni_zero_is_literal_unless_it_cancels_marks() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+
+    assert_eq!(type_raw(session, &mut req, "10"), "10");
+    hc_session_reset(session);
+
+    assert_eq!(type_raw(session, &mut req, "1230"), "1230");
+    hc_session_reset(session);
+
+    assert_eq!(type_raw(session, &mut req, "a0"), "a0");
+    hc_session_reset(session);
+
+    assert_eq!(type_raw(session, &mut req, "a10"), "a");
+    let (committed, status) = commit_with_space(session, &mut req);
+    assert_eq!(committed, "a");
+    assert_eq!(status, HCStatusFlag::Commit as i32);
+    req.kind = HCKeyKind::Printable as i32;
+    hc_session_reset(session);
+
+    assert_eq!(type_raw(session, &mut req, "u70"), "u");
+
     hc_session_free(session);
 }
 
@@ -404,6 +446,19 @@ fn mixed_language_model_falls_back_for_english_collisions() {
     let (committed, status) = commit_with_space(session, &mut req);
     assert_eq!(committed, "rust");
     assert_eq!(status, HCStatusFlag::EnglishFallback as i32);
+
+    hc_session_free(session);
+}
+
+#[test]
+fn telex_shape_trigger_commit_prefers_vietnamese_collision() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+
+    assert_eq!(type_raw(session, &mut req, "moo"), "mô");
+    let (committed, status) = commit_with_space(session, &mut req);
+    assert_eq!(committed, "mô");
+    assert_eq!(status, HCStatusFlag::Commit as i32);
 
     hc_session_free(session);
 }

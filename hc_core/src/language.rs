@@ -107,34 +107,55 @@ pub fn segment_context(input: &str) -> Vec<ContextSegment> {
 
 fn raw_base_for_vietnamese_shape(raw: &str, mode: InputMode) -> String {
     let mut chars: Vec<char> = raw.chars().collect();
-    if let Some(last) = chars.last().copied() {
-        let is_terminal_trigger = match mode {
-            InputMode::Telex => matches!(
-                last,
-                's' | 'S' | 'f' | 'F' | 'r' | 'R' | 'x' | 'X' | 'j' | 'J' | 'w' | 'W'
-            ),
-            InputMode::Vni => last.is_ascii_digit(),
-            InputMode::Viqr => is_viqr_trigger(last),
-        };
-        if is_terminal_trigger {
-            chars.pop();
+    match mode {
+        InputMode::Telex => {
+            while raw_has_terminal_telex_trigger(&chars) {
+                chars.pop();
+            }
+        }
+        InputMode::Vni => {
+            while chars.last().is_some_and(|last| last.is_ascii_digit()) {
+                chars.pop();
+            }
+        }
+        InputMode::Viqr => {
+            if chars.last().is_some_and(|last| is_viqr_trigger(*last)) {
+                chars.pop();
+            }
         }
     }
     chars.into_iter().collect()
 }
 
 fn is_terminal_vietnamese_trigger(raw: &str, mode: InputMode) -> bool {
-    let Some(last) = raw.chars().last() else {
+    let chars: Vec<char> = raw.chars().collect();
+    let Some(&last) = chars.last() else {
         return false;
     };
     match mode {
-        InputMode::Telex => matches!(
-            last,
-            's' | 'S' | 'f' | 'F' | 'r' | 'R' | 'x' | 'X' | 'j' | 'J'
-        ),
+        InputMode::Telex => raw_has_terminal_telex_trigger(&chars),
         InputMode::Vni => matches!(last, '1'..='9'),
         InputMode::Viqr => matches!(last, '\'' | '`' | '?' | '~' | '.'),
     }
+}
+
+fn raw_has_terminal_telex_trigger(chars: &[char]) -> bool {
+    let Some(&last) = chars.last() else {
+        return false;
+    };
+    if matches!(
+        last,
+        's' | 'S' | 'f' | 'F' | 'r' | 'R' | 'x' | 'X' | 'j' | 'J' | 'w' | 'W' | 'z' | 'Z'
+    ) {
+        return true;
+    }
+
+    if chars.len() < 2 {
+        return false;
+    }
+    let previous = chars[chars.len() - 2];
+    let trigger = last.to_ascii_lowercase();
+    matches!(trigger, 'a' | 'e' | 'o' | 'd') && previous.to_ascii_lowercase() == trigger
 }
 
 fn has_english_suffix(word: &str) -> bool {
@@ -249,6 +270,7 @@ const ENGLISH_WORDS: &[&str] = &[
     "messages",
     "mixed",
     "model",
+    "moo",
     "native",
     "open",
     "opencode",
