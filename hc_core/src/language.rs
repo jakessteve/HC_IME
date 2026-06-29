@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::types::{ContextSegment, InputMode, LanguageScores, SegmentKind, Tone};
 use crate::vowel::{has_vietnamese_mark, strip_marks_ascii_lower, vowel_signature};
@@ -182,17 +182,39 @@ pub fn is_known_english_word(word: &str) -> bool {
         || external_english_dictionary().is_some_and(|dictionary| dictionary.contains(word))
 }
 
-static EXTERNAL_ENGLISH_DICTIONARY: OnceLock<Option<HashSet<String>>> = OnceLock::new();
-
-fn external_english_dictionary() -> Option<&'static HashSet<String>> {
-    EXTERNAL_ENGLISH_DICTIONARY
-        .get_or_init(load_external_english_dictionary)
-        .as_ref()
+#[derive(Default)]
+struct DictionaryCache {
+    paths: Vec<PathBuf>,
+    dictionary: Option<Arc<HashSet<String>>>,
 }
 
-fn load_external_english_dictionary() -> Option<HashSet<String>> {
-    for path in english_dictionary_paths() {
-        let Ok(contents) = fs::read_to_string(&path) else {
+fn load_cached_dictionary(
+    cache: &Mutex<DictionaryCache>,
+    paths: Vec<PathBuf>,
+    loader: fn(&[PathBuf]) -> Option<HashSet<String>>,
+) -> Option<Arc<HashSet<String>>> {
+    let mut cache = cache.lock().unwrap();
+    if cache.paths != paths {
+        cache.paths = paths.clone();
+        cache.dictionary = loader(&paths).map(Arc::new);
+    }
+    cache.dictionary.clone()
+}
+
+static EXTERNAL_ENGLISH_DICTIONARY: OnceLock<Mutex<DictionaryCache>> = OnceLock::new();
+
+fn external_english_dictionary() -> Option<Arc<HashSet<String>>> {
+    let cache = EXTERNAL_ENGLISH_DICTIONARY.get_or_init(|| Mutex::new(DictionaryCache::default()));
+    load_cached_dictionary(
+        cache,
+        english_dictionary_paths(),
+        load_external_english_dictionary,
+    )
+}
+
+fn load_external_english_dictionary(paths: &[PathBuf]) -> Option<HashSet<String>> {
+    for path in paths {
+        let Ok(contents) = fs::read_to_string(path) else {
             continue;
         };
         let words: HashSet<String> = contents
@@ -320,17 +342,21 @@ fn is_known_vietnamese_word(word: &str) -> bool {
     VIETNAMESE_WORDS.contains(&word)
 }
 
-static EXTERNAL_VIETNAMESE_DICTIONARY: OnceLock<Option<HashSet<String>>> = OnceLock::new();
+static EXTERNAL_VIETNAMESE_DICTIONARY: OnceLock<Mutex<DictionaryCache>> = OnceLock::new();
 
-pub fn external_vietnamese_dictionary() -> Option<&'static HashSet<String>> {
-    EXTERNAL_VIETNAMESE_DICTIONARY
-        .get_or_init(load_external_vietnamese_dictionary)
-        .as_ref()
+pub fn external_vietnamese_dictionary() -> Option<Arc<HashSet<String>>> {
+    let cache =
+        EXTERNAL_VIETNAMESE_DICTIONARY.get_or_init(|| Mutex::new(DictionaryCache::default()));
+    load_cached_dictionary(
+        cache,
+        vietnamese_dictionary_paths(),
+        load_external_vietnamese_dictionary,
+    )
 }
 
-fn load_external_vietnamese_dictionary() -> Option<HashSet<String>> {
-    for path in vietnamese_dictionary_paths() {
-        let Ok(contents) = fs::read_to_string(&path) else {
+fn load_external_vietnamese_dictionary(paths: &[PathBuf]) -> Option<HashSet<String>> {
+    for path in paths {
+        let Ok(contents) = fs::read_to_string(path) else {
             continue;
         };
         let words: HashSet<String> = contents
@@ -454,4 +480,77 @@ const VIETNAMESE_VOWEL_CLUSTERS: &[&str] = &[
 
 pub fn is_viqr_trigger(ch: char) -> bool {
     matches!(ch, '\'' | '`' | '?' | '~' | '.' | '^' | '+' | '(')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_path(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("hcime-{name}-{}-{stamp}.dict", std::process::id()))
+    }
+
+    #[test]
+    fn cached_dictionary_reloads_when_paths_change() {
+        let english_path_one = unique_temp_path("english-one");
+        let english_path_two = unique_temp_path("english-two");
+        let vietnamese_path_one = unique_temp_path("vietnamese-one");
+        let vietnamese_path_two = unique_temp_path("vietnamese-two");
+
+        fs::write(&english_path_one, "alpha\n").expect("write english path one");
+        fs::write(&english_path_two, "beta\n").expect("write english path two");
+        fs::write(&vietnamese_path_one, "sắc\n").expect("write vietnamese path one");
+        fs::write(&vietnamese_path_two, "mưa\n").expect("write vietnamese path two");
+
+        let english_cache = Mutex::new(DictionaryCache::default());
+        let first_english = load_cached_dictionary(
+            &english_cache,
+            vec![english_path_one.clone()],
+            load_external_english_dictionary,
+        )
+        .expect("load first english dictionary");
+        assert!(first_english.contains("alpha"));
+        assert!(!first_english.contains("beta"));
+
+        let second_english = load_cached_dictionary(
+            &english_cache,
+            vec![english_path_two.clone()],
+            load_external_english_dictionary,
+        )
+        .expect("load second english dictionary");
+        assert!(second_english.contains("beta"));
+        assert!(!second_english.contains("alpha"));
+
+        let vietnamese_cache = Mutex::new(DictionaryCache::default());
+        let first_vietnamese = load_cached_dictionary(
+            &vietnamese_cache,
+            vec![vietnamese_path_one.clone()],
+            load_external_vietnamese_dictionary,
+        )
+        .expect("load first vietnamese dictionary");
+        assert!(first_vietnamese.contains("sac"));
+        assert!(!first_vietnamese.contains("mua"));
+
+        let second_vietnamese = load_cached_dictionary(
+            &vietnamese_cache,
+            vec![vietnamese_path_two.clone()],
+            load_external_vietnamese_dictionary,
+        )
+        .expect("load second vietnamese dictionary");
+        assert!(second_vietnamese.contains("mua"));
+        assert!(!second_vietnamese.contains("sac"));
+
+        let _ = fs::remove_file(english_path_one);
+        let _ = fs::remove_file(english_path_two);
+        let _ = fs::remove_file(vietnamese_path_one);
+        let _ = fs::remove_file(vietnamese_path_two);
+    }
 }
