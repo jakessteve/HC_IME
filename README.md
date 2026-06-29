@@ -102,7 +102,13 @@ Open the Fcitx5 configuration UI with:
 fcitx5-configtool
 ```
 
-The generated HC_IME settings panel includes:
+The generated HC_IME settings panel is grouped into clear sections:
+
+- `Input settings`
+- `Typing behavior`
+- `Dictionary paths`
+
+Inside those sections, you will find:
 
 - `Input mode`
 - `Use legacy tone placement`

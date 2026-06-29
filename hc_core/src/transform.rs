@@ -233,9 +233,19 @@ fn tone_target_index(chars: &[char], legacy_tone: bool) -> Option<usize> {
         vowels.remove(0);
     }
 
-    let &last = vowels.last()?;
-    if vowels.len() == 1 {
-        return Some(last);
+    let bases: String = vowels.iter().map(|&idx| base_char(chars[idx])).collect();
+    let cluster = bases.as_str();
+
+    match cluster {
+        "eu" => return vowels.first().copied(),
+        "ieu" | "yeu" => return vowels.get(1).copied().or_else(|| vowels.last().copied()),
+        "ai" | "ao" | "au" | "ay" | "eo" | "ia" | "iu" | "oi" | "ua" | "ui" => {
+            return vowels.first().copied();
+        }
+        "oa" | "oe" | "uy" => return vowels.last().copied(),
+        "uo" | "uye" => return vowels.last().copied(),
+        "oai" | "uai" | "uay" => return vowels.get(1).copied().or_else(|| vowels.last().copied()),
+        _ => {}
     }
 
     for preferred in [
@@ -253,16 +263,8 @@ fn tone_target_index(chars: &[char], legacy_tone: bool) -> Option<usize> {
         }
     }
 
-    let bases: String = vowels.iter().map(|&idx| base_char(chars[idx])).collect();
-    let cluster = bases.as_str();
-
     match cluster {
-        "ai" | "ao" | "au" | "ay" | "eo" | "ia" | "iu" | "oi" | "ua" | "ui" => {
-            return vowels.first().copied();
-        }
-        "oa" | "oe" | "uy" => return vowels.last().copied(),
-        "ie" | "ye" | "uo" | "uye" => return vowels.last().copied(),
-        "oai" | "uai" | "uay" | "oay" | "uoi" | "ieu" | "yeu" => {
+        "ie" | "ye" | "oay" | "uoi" | "ieu" | "yeu" => {
             return vowels.get(1).copied().or_else(|| vowels.last().copied());
         }
         _ => {}

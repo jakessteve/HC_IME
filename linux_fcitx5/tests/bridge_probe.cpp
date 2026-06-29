@@ -71,6 +71,10 @@ static bool send(hcime::HcImeEngine& engine, const InputMethodEntry& entry, Mock
     return event.accepted() && event.filtered();
 }
 
+static std::vector<Action*> hcimeStatusActions(MockInputContext& ic) {
+    return ic.statusArea().actions(StatusGroup::InputMethod);
+}
+
 int main() {
     {
         InputContextManager manager;
@@ -84,12 +88,13 @@ int main() {
         require(engine.subMode(entry, ic) == "Telex", "default mode is Telex");
         InputContextEvent activateEvent(&ic, EventType::InputContextInputMethodActivated);
         engine.activate(entry, activateEvent);
-        const auto actions = ic.statusArea().actions(StatusGroup::InputMethod);
-        require(actions.size() == 7, "status menu exposes three modes and four behavior toggles");
-        require(actions[0]->shortText(&ic) == "Telex", "status menu includes Telex mode");
-        require(actions[1]->shortText(&ic) == "VNI", "status menu includes VNI mode");
+        const auto actions = hcimeStatusActions(ic);
+        require(actions.size() == 8, "status menu exposes three modes, a separator, and four behavior toggles");
+        require(actions[0]->shortText(&ic) == "VNI", "status menu includes VNI mode");
+        require(actions[1]->shortText(&ic) == "TELEX", "status menu includes Telex mode");
         require(actions[2]->shortText(&ic) == "VIQR", "status menu includes VIQR mode");
-        require(actions[0]->isChecked(&ic), "Telex mode is checked by default");
+        require(actions[3]->isSeparator(), "status menu separates mode and behavior groups");
+        require(actions[1]->isChecked(&ic), "Telex mode is checked by default");
 
         require(send(engine, entry, ic, FcitxKey_a), "a accepted");
         require(ic.inputPanel().clientPreedit().toString() == "a", "preedit after a");
@@ -137,10 +142,10 @@ int main() {
         const auto& entry = entries.front();
         InputContextEvent activateEvent(&ic, EventType::InputContextInputMethodActivated);
         engine.activate(entry, activateEvent);
-        const auto actions = ic.statusArea().actions(StatusGroup::InputMethod);
-        actions[1]->activate(&ic);
+        const auto actions = hcimeStatusActions(ic);
+        actions[0]->activate(&ic);
         require(engine.subMode(entry, ic) == "VNI", "status action switches to VNI");
-        require(actions[1]->isChecked(&ic), "VNI action becomes checked");
+        require(actions[0]->isChecked(&ic), "VNI action becomes checked");
         require(send(engine, entry, ic, FcitxKey_a), "VNI action a accepted");
         require(send(engine, entry, ic, FcitxKey_1), "VNI action tone accepted");
         require(ic.inputPanel().clientPreedit().toString() == "á", "VNI action composes digits");
@@ -154,8 +159,38 @@ int main() {
         const auto& entry = entries.front();
         InputContextEvent activateEvent(&ic, EventType::InputContextInputMethodActivated);
         engine.activate(entry, activateEvent);
-        const auto actions = ic.statusArea().actions(StatusGroup::InputMethod);
-        actions[1]->activate(&ic);
+        const auto actions = hcimeStatusActions(ic);
+        actions[0]->activate(&ic);
+
+        require(send(engine, entry, ic, FcitxKey_c), "VNI spaced edit c accepted");
+        require(send(engine, entry, ic, FcitxKey_a), "VNI spaced edit a accepted");
+        require(send(engine, entry, ic, FcitxKey_1), "VNI spaced edit acute accepted");
+        require(ic.inputPanel().clientPreedit().toString() == "cá", "VNI spaced edit composes cá");
+        require(send(engine, entry, ic, FcitxKey_space), "VNI spaced edit commits with space");
+        require(ic.commits.size() == 1 && ic.commits.back() == "cá", "VNI spaced edit commits cá");
+        require(ic.forwards.size() == 1 && ic.forwards.back() == FcitxKey_space, "VNI spaced edit forwards space");
+
+        require(send(engine, entry, ic, FcitxKey_BackSpace), "VNI spaced edit reopens committed word");
+        require(ic.forwards.size() == 1, "VNI spaced edit consumes reopening backspace");
+        require(ic.surroundingDeletes.size() == 1, "VNI spaced edit deletes committed word and trailing space");
+        require(ic.surroundingDeletes.back().first == -3 && ic.surroundingDeletes.back().second == 3,
+                "VNI spaced edit deletes cá plus the trailing space");
+        require(ic.inputPanel().clientPreedit().toString() == "cá", "VNI spaced edit restores cá as preedit");
+
+        require(send(engine, entry, ic, FcitxKey_2), "VNI spaced edit grave accepted");
+        require(ic.inputPanel().clientPreedit().toString() == "cà", "VNI spaced edit changes cá to cà");
+    }
+
+    {
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        InputContextEvent activateEvent(&ic, EventType::InputContextInputMethodActivated);
+        engine.activate(entry, activateEvent);
+        const auto actions = hcimeStatusActions(ic);
+        actions[0]->activate(&ic);
         require(!send(engine, entry, ic, FcitxKey_1), "standalone VNI digit is passed through");
         require(!send(engine, entry, ic, FcitxKey_0), "standalone VNI zero is passed through");
         require(ic.inputPanel().clientPreedit().toString().empty(), "standalone VNI digits do not create preedit");
@@ -174,7 +209,7 @@ int main() {
         const auto& entry = entries.front();
         InputContextEvent activateEvent(&ic, EventType::InputContextInputMethodActivated);
         engine.activate(entry, activateEvent);
-        const auto actions = ic.statusArea().actions(StatusGroup::InputMethod);
+        const auto actions = hcimeStatusActions(ic);
         actions[2]->activate(&ic);
         require(engine.subMode(entry, ic) == "VIQR", "status action switches to VIQR");
         require(actions[2]->isChecked(&ic), "VIQR action becomes checked");

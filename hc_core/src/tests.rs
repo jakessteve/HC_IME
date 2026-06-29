@@ -1,6 +1,7 @@
 use super::test_helpers::*;
 use super::*;
 use std::ptr;
+use std::time::Duration;
 
 #[test]
 fn telex_simple_tone_and_cancel() {
@@ -200,6 +201,56 @@ fn session_backspace_rehydrates_after_commit() {
         HCStatusFlag::ReconversionActive as i32
     );
     assert_eq!(read_and_free(back.state), "hoà");
+    hc_session_free(session);
+}
+
+#[test]
+fn vni_spaced_commit_can_be_reopened_for_tone_change_within_timeout() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+
+    assert_eq!(type_raw(session, &mut req, "ca1"), "cá");
+    let (committed, status) = commit_with_space(session, &mut req);
+    assert_eq!(committed, "cá");
+    assert_eq!(status, HCStatusFlag::Commit as i32);
+
+    req.kind = HCKeyKind::Backspace as i32;
+    req.text = ptr::null();
+    let back = hc_session_handle_key(session, &req);
+    assert_eq!(
+        back.state.status_flag,
+        HCStatusFlag::ReconversionActive as i32
+    );
+    assert_eq!(read_and_free(back.state), "cá");
+
+    req.kind = HCKeyKind::Printable as i32;
+    let two = c("2");
+    req.text = two.as_ptr();
+    let edit = hc_session_handle_key(session, &req);
+    assert_eq!(edit.state.status_flag, HCStatusFlag::InProgress as i32);
+    assert_eq!(read_and_free(edit.state), "cà");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn spaced_commit_edit_window_expires() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+
+    assert_eq!(type_raw(session, &mut req, "ca1"), "cá");
+    let (committed, status) = commit_with_space(session, &mut req);
+    assert_eq!(committed, "cá");
+    assert_eq!(status, HCStatusFlag::Commit as i32);
+
+    std::thread::sleep(Duration::from_millis(1600));
+
+    req.kind = HCKeyKind::Backspace as i32;
+    req.text = ptr::null();
+    let back = hc_session_handle_key(session, &req);
+    assert_eq!(back.handled, 0);
+    free_state(back.state);
+
     hc_session_free(session);
 }
 
@@ -569,6 +620,8 @@ fn vni_tones_use_modern_placement() {
     assert_eq!(type_raw(session, &mut req, "hoan2"), "hoàn");
     hc_session_reset(session);
     assert_eq!(type_raw(session, &mut req, "tuye6n4"), "tuyễn");
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "ne6u1"), "nếu");
 
     hc_session_free(session);
 }

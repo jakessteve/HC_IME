@@ -57,6 +57,7 @@ struct IcuuidHash {
 struct ContextState {
     SessionHandle session;
     bool hasActivePreedit = false;
+    unsigned int lastCommitTrailingChars = 0;
 };
 
 struct StateHandle {
@@ -96,18 +97,30 @@ enum class HcImeMenuItem {
 };
 
 FCITX_CONFIGURATION(
-    HcImeConfig,
+    HcImeInputConfig,
     Option<HcImeInputMode> inputMode{this, "InputMethod", "Input mode", HcImeInputMode::Telex};
-    Option<bool> legacyTone{this, "LegacyTone", "Use legacy tone placement", false};
+    Option<bool> legacyTone{this, "LegacyTone", "Use legacy tone placement", false};)
+
+FCITX_CONFIGURATION(
+    HcImeBehaviorConfig,
     Option<bool> spellCheck{this, "SpellCheck", "Validate Vietnamese words with dictionaries and rules", true};
     Option<bool> autoRestore{this, "AutoRestore", "Restore invalid Vietnamese sequences to raw keystrokes", true};
-    Option<bool> displayUnderline{this, "DisplayUnderline", "Underline the preedit text", false};
+    Option<bool> displayUnderline{this, "DisplayUnderline", "Underline the preedit text", false};)
+
+FCITX_CONFIGURATION(
+    HcImeDictionaryConfig,
     Option<std::string> vietnameseDictionaryPath{
         this,
         "VietnameseDictionaryPath",
         "Vietnamese dictionary path",
         "/usr/share/fcitx5/bamboo/vietnamese.cm.dict"};
     Option<std::string> englishDictionaryPath{this, "EnglishDictionaryPath", "English dictionary path", ""};)
+
+FCITX_CONFIGURATION(
+    HcImeConfig,
+    Option<HcImeInputConfig> input{this, "Input", "Input settings", {}};
+    Option<HcImeBehaviorConfig> behavior{this, "Behavior", "Typing behavior", {}};
+    Option<HcImeDictionaryConfig> dictionary{this, "Dictionary", "Dictionary paths", {}};)
 
 static void SetEnvIfNotEmpty(const char* name, const std::string& value) {
     if (!value.empty()) {
@@ -233,6 +246,25 @@ static std::string StateToUtf8(const HC_State& state) {
     return result;
 }
 
+static void copyLegacyConfigValue(RawConfig& config, const char* oldPath, const char* newPath) {
+    if (config.valueByPath(newPath) != nullptr) {
+        return;
+    }
+    if (const auto* value = config.valueByPath(oldPath)) {
+        config.setValueByPath(newPath, *value);
+    }
+}
+
+static void migrateLegacyConfig(RawConfig& config) {
+    copyLegacyConfigValue(config, "InputMethod", "Input/InputMethod");
+    copyLegacyConfigValue(config, "LegacyTone", "Input/LegacyTone");
+    copyLegacyConfigValue(config, "SpellCheck", "Behavior/SpellCheck");
+    copyLegacyConfigValue(config, "AutoRestore", "Behavior/AutoRestore");
+    copyLegacyConfigValue(config, "DisplayUnderline", "Behavior/DisplayUnderline");
+    copyLegacyConfigValue(config, "VietnameseDictionaryPath", "Dictionary/VietnameseDictionaryPath");
+    copyLegacyConfigValue(config, "EnglishDictionaryPath", "Dictionary/EnglishDictionaryPath");
+}
+
 }  // namespace
 
 class HcImeEngine final : public InputMethodEngineV2 {
@@ -262,7 +294,9 @@ public:
     }
 
     void setConfig(const RawConfig& config) override {
-        config_.load(config, true);
+        RawConfig migratedConfig = config;
+        migrateLegacyConfig(migratedConfig);
+        config_.load(migratedConfig, true);
         applyRuntimeConfig();
         refreshStatusMenu();
         save();
@@ -271,7 +305,10 @@ public:
 
     void reloadConfig() override {
         if (instance_ != nullptr) {
-            readAsIni(config_, StandardPathsType::Config, kConfigPath);
+            RawConfig rawConfig;
+            readAsIni(rawConfig, StandardPathsType::Config, kConfigPath);
+            migrateLegacyConfig(rawConfig);
+            config_.load(rawConfig, true);
         }
         applyRuntimeConfig();
         refreshStatusMenu();
@@ -285,7 +322,7 @@ public:
 
     void keyEvent(const InputMethodEntry& entry, KeyEvent& event) override {
         auto& state = stateFor(event.inputContext());
-        const int32_t mode = toSessionInputMode(*config_.inputMode);
+        const int32_t mode = toSessionInputMode(*config_.input->inputMode);
 
         if (event.isRelease()) {
             return;
@@ -296,9 +333,9 @@ public:
                 HC_KEY_UNDO,
                 nullptr,
                 mode,
-                static_cast<uint8_t>(*config_.legacyTone),
-                static_cast<uint8_t>(*config_.spellCheck),
-                static_cast<uint8_t>(*config_.autoRestore),
+                static_cast<uint8_t>(*config_.input->legacyTone),
+                static_cast<uint8_t>(*config_.behavior->spellCheck),
+                static_cast<uint8_t>(*config_.behavior->autoRestore),
             };
             HC_KeyResult undoResult = hc_session_handle_key(state.session.ptr, &undoRequest);
             StateHandle undoState{&undoResult.state};
@@ -308,7 +345,7 @@ public:
                     state.hasActivePreedit = false;
                     clearPreedit(event.inputContext());
                 } else {
-                    setPreedit(event.inputContext(), undoOutput, *config_.displayUnderline, undoResult.state.spell_check_status);
+                    setPreedit(event.inputContext(), undoOutput, *config_.behavior->displayUnderline, undoResult.state.spell_check_status);
                 }
                 event.filterAndAccept();
             }
@@ -333,6 +370,8 @@ public:
         if (isBackspaceKey(event.key()) && (!state.hasActivePreedit || HasCommandModifier(event.key()))) {
             if (state.hasActivePreedit && HasCommandModifier(event.key())) {
                 commitAndForwardKey(event, state, mode);
+            } else if (tryReconvertLastCommitFromBackspace(event, state, mode)) {
+                return;
             } else {
                 resetAndForwardKey(event, state);
             }
@@ -359,9 +398,9 @@ public:
             classify(event.key(), input),
             input.empty() ? nullptr : input.c_str(),
             mode,
-            static_cast<uint8_t>(*config_.legacyTone),
-            static_cast<uint8_t>(*config_.spellCheck),
-            static_cast<uint8_t>(*config_.autoRestore),
+            static_cast<uint8_t>(*config_.input->legacyTone),
+            static_cast<uint8_t>(*config_.behavior->spellCheck),
+            static_cast<uint8_t>(*config_.behavior->autoRestore),
         };
 
         if (state.session.ptr == nullptr) {
@@ -385,11 +424,12 @@ public:
         switch (result.state.status_flag) {
             case HC_STATUS_IN_PROGRESS:
             case HC_STATUS_RECONVERSION_ACTIVE:
+                state.lastCommitTrailingChars = 0;
                 state.hasActivePreedit = !output.empty();
                 if (output.empty()) {
                     clearPreedit(event.inputContext());
                 } else {
-                    setPreedit(event.inputContext(), output, *config_.displayUnderline, result.state.spell_check_status);
+                    setPreedit(event.inputContext(), output, *config_.behavior->displayUnderline, result.state.spell_check_status);
                 }
                 event.filterAndAccept();
                 return;
@@ -397,8 +437,12 @@ public:
             case HC_STATUS_ENGLISH_FALLBACK:
                 event.inputContext()->commitString(output);
                 state.hasActivePreedit = false;
+                state.lastCommitTrailingChars = 0;
                 clearPreedit(event.inputContext());
-                if (request.kind == HC_KEY_SPACE || request.kind == HC_KEY_ENTER || request.kind == HC_KEY_BOUNDARY) {
+                if (request.kind == HC_KEY_SPACE || request.kind == HC_KEY_BOUNDARY) {
+                    state.lastCommitTrailingChars = output.empty() ? 0 : 1;
+                    event.inputContext()->forwardKey(event.rawKey(), event.isRelease(), event.time());
+                } else if (request.kind == HC_KEY_ENTER) {
                     event.inputContext()->forwardKey(event.rawKey(), event.isRelease(), event.time());
                 }
                 event.filterAndAccept();
@@ -413,7 +457,7 @@ public:
     void activate(const InputMethodEntry& entry, InputContextEvent& event) override {
         auto& state = stateFor(event.inputContext());
         if (state.session.ptr == nullptr) {
-            state.session.ptr = hc_session_new(toSessionInputMode(*config_.inputMode), 0);
+            state.session.ptr = hc_session_new(toSessionInputMode(*config_.input->inputMode), 0);
         }
         attachStatusMenu(event.inputContext());
     }
@@ -424,6 +468,7 @@ public:
             hc_session_reset(state.session.ptr);
         }
         state.hasActivePreedit = false;
+        state.lastCommitTrailingChars = 0;
         clearPreedit(event.inputContext());
         event.inputContext()->statusArea().clearGroup(StatusGroup::InputMethod);
         event.inputContext()->updateUserInterface(UserInterfaceComponent::StatusArea, true);
@@ -435,11 +480,12 @@ public:
             hc_session_reset(state.session.ptr);
         }
         state.hasActivePreedit = false;
+        state.lastCommitTrailingChars = 0;
         clearPreedit(event.inputContext());
     }
 
     std::string subMode(const InputMethodEntry&, InputContext&) override {
-        return modeLabel(*config_.inputMode);
+        return modeLabel(*config_.input->inputMode);
     }
 
 private:
@@ -453,6 +499,7 @@ private:
                 hc_session_reset(state.session.ptr);
             }
             state.hasActivePreedit = false;
+            state.lastCommitTrailingChars = 0;
         }
     }
 
@@ -461,6 +508,7 @@ private:
             hc_session_reset(state.session.ptr);
         }
         state.hasActivePreedit = false;
+        state.lastCommitTrailingChars = 0;
         clearPreedit(event.inputContext());
     }
 
@@ -476,9 +524,9 @@ private:
             HC_KEY_BACKSPACE,
             nullptr,
             mode,
-            static_cast<uint8_t>(*config_.legacyTone),
-            static_cast<uint8_t>(*config_.spellCheck),
-            static_cast<uint8_t>(*config_.autoRestore),
+            static_cast<uint8_t>(*config_.input->legacyTone),
+            static_cast<uint8_t>(*config_.behavior->spellCheck),
+            static_cast<uint8_t>(*config_.behavior->autoRestore),
         };
         HC_KeyResult deleteResult = hc_session_handle_key(state.session.ptr, &deleteRequest);
         StateHandle deleteState{&deleteResult.state};
@@ -493,7 +541,7 @@ private:
             clearPreedit(event.inputContext());
         } else {
             state.hasActivePreedit = true;
-            setPreedit(event.inputContext(), output, *config_.displayUnderline, deleteResult.state.spell_check_status);
+            setPreedit(event.inputContext(), output, *config_.behavior->displayUnderline, deleteResult.state.spell_check_status);
         }
         event.filterAndAccept();
     }
@@ -506,9 +554,9 @@ private:
             HC_KEY_ENTER,
             nullptr,
             mode,
-            static_cast<uint8_t>(*config_.legacyTone),
-            static_cast<uint8_t>(*config_.spellCheck),
-            static_cast<uint8_t>(*config_.autoRestore),
+            static_cast<uint8_t>(*config_.input->legacyTone),
+            static_cast<uint8_t>(*config_.behavior->spellCheck),
+            static_cast<uint8_t>(*config_.behavior->autoRestore),
         };
         HC_KeyResult commitResult = hc_session_handle_key(state.session.ptr, &commitRequest);
         StateHandle commitState{&commitResult.state};
@@ -517,7 +565,40 @@ private:
             event.inputContext()->commitString(committedText);
         }
         state.hasActivePreedit = false;
+        state.lastCommitTrailingChars = 0;
         clearPreedit(event.inputContext());
+    }
+
+    bool tryReconvertLastCommitFromBackspace(KeyEvent& event, ContextState& state, int32_t mode) {
+        if (state.session.ptr == nullptr || state.lastCommitTrailingChars == 0) {
+            return false;
+        }
+
+        HC_KeyRequest request{
+            HC_KEY_BACKSPACE,
+            nullptr,
+            mode,
+            static_cast<uint8_t>(*config_.input->legacyTone),
+            static_cast<uint8_t>(*config_.behavior->spellCheck),
+            static_cast<uint8_t>(*config_.behavior->autoRestore),
+        };
+        HC_KeyResult result = hc_session_handle_key(state.session.ptr, &request);
+        StateHandle resultState{&result.state};
+        const std::string output = StateToUtf8(result.state);
+
+        if (result.handled == 0 || result.state.error_code < 0 ||
+            result.state.status_flag != HC_STATUS_RECONVERSION_ACTIVE || output.empty()) {
+            return false;
+        }
+
+        const auto committedChars = static_cast<unsigned int>(utf8::length(output));
+        const auto deleteChars = committedChars + state.lastCommitTrailingChars;
+        event.inputContext()->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
+        state.lastCommitTrailingChars = 0;
+        state.hasActivePreedit = true;
+        setPreedit(event.inputContext(), output, *config_.behavior->displayUnderline, result.state.spell_check_status);
+        event.filterAndAccept();
+        return true;
     }
 
     void resetAndForwardKey(KeyEvent& event, ContextState& state) {
@@ -533,18 +614,11 @@ private:
     }
 
     void applyRuntimeConfig() {
-        SetEnvIfNotEmpty("HC_IME_VI_DICT", *config_.vietnameseDictionaryPath);
-        SetEnvIfNotEmpty("HC_IME_EN_DICT", *config_.englishDictionaryPath);
+        SetEnvIfNotEmpty("HC_IME_VI_DICT", *config_.dictionary->vietnameseDictionaryPath);
+        SetEnvIfNotEmpty("HC_IME_EN_DICT", *config_.dictionary->englishDictionaryPath);
     }
 
     void buildStatusMenu() {
-        statusMenu_ = std::make_unique<Menu>();
-        statusRootAction_ = std::make_unique<SimpleAction>();
-        statusRootAction_->setShortText("HC_IME");
-        statusRootAction_->setLongText("HC_IME");
-        statusRootAction_->setIcon("input-keyboard");
-        statusRootAction_->setMenu(statusMenu_.get());
-
         auto addToggleAction = [this](const std::string& text, HcImeMenuItem item, const std::string& tooltip) {
             auto action = std::make_unique<SimpleAction>();
             action->setShortText(text);
@@ -552,16 +626,22 @@ private:
             action->setCheckable(true);
             actionConnections_.push_back(action->connect<SimpleAction::Activated>(
                 [this, item](InputContext* ic) { onMenuActivated(item, ic); }));
-            statusMenu_->addAction(action.get());
             return action;
         };
 
-        modeActions_[0] = addToggleAction("Telex", HcImeMenuItem::ModeTelex,
-                                           "Switch HC_IME input mode to Telex");
+        auto addSeparatorAction = [this]() {
+            auto action = std::make_unique<SimpleAction>();
+            action->setSeparator(true);
+            return action;
+        };
+
         modeActions_[1] = addToggleAction("VNI", HcImeMenuItem::ModeVni,
                                            "Switch HC_IME input mode to VNI");
+        modeActions_[0] = addToggleAction("TELEX", HcImeMenuItem::ModeTelex,
+                                           "Switch HC_IME input mode to Telex");
         modeActions_[2] = addToggleAction("VIQR", HcImeMenuItem::ModeViqr,
                                             "Switch HC_IME input mode to VIQR");
+        separatorAction_ = addSeparatorAction();
         toggleActions_[0] = addToggleAction("Legacy tone placement", HcImeMenuItem::LegacyTone,
                                             "Toggle legacy tone placement");
         toggleActions_[1] = addToggleAction("Spell check", HcImeMenuItem::SpellCheck,
@@ -584,10 +664,10 @@ private:
     }
 
     void registerStatusActions() {
-        registerStatusAction("hcime-status", statusRootAction_.get());
         registerStatusAction("hcime-mode-telex", modeActions_[0].get());
         registerStatusAction("hcime-mode-vni", modeActions_[1].get());
         registerStatusAction("hcime-mode-viqr", modeActions_[2].get());
+        registerStatusAction("hcime-mode-separator", separatorAction_.get());
         registerStatusAction("hcime-toggle-legacy-tone", toggleActions_[0].get());
         registerStatusAction("hcime-toggle-spell-check", toggleActions_[1].get());
         registerStatusAction("hcime-toggle-auto-restore", toggleActions_[2].get());
@@ -606,21 +686,22 @@ private:
     }
 
     void refreshStatusMenu() {
-        modeActions_[0]->setChecked(*config_.inputMode == HcImeInputMode::Telex);
-        modeActions_[1]->setChecked(*config_.inputMode == HcImeInputMode::Vni);
-        modeActions_[2]->setChecked(*config_.inputMode == HcImeInputMode::Viqr);
-        toggleActions_[0]->setChecked(*config_.legacyTone);
-        toggleActions_[1]->setChecked(*config_.spellCheck);
-        toggleActions_[2]->setChecked(*config_.autoRestore);
-        toggleActions_[3]->setChecked(*config_.displayUnderline);
+        modeActions_[0]->setChecked(*config_.input->inputMode == HcImeInputMode::Telex);
+        modeActions_[1]->setChecked(*config_.input->inputMode == HcImeInputMode::Vni);
+        modeActions_[2]->setChecked(*config_.input->inputMode == HcImeInputMode::Viqr);
+        toggleActions_[0]->setChecked(*config_.input->legacyTone);
+        toggleActions_[1]->setChecked(*config_.behavior->spellCheck);
+        toggleActions_[2]->setChecked(*config_.behavior->autoRestore);
+        toggleActions_[3]->setChecked(*config_.behavior->displayUnderline);
     }
 
     void attachStatusMenu(InputContext* ic) {
         auto& statusArea = ic->statusArea();
         statusArea.clearGroup(StatusGroup::InputMethod);
-        for (const auto& action : modeActions_) {
-            statusArea.addAction(StatusGroup::InputMethod, action.get());
-        }
+        statusArea.addAction(StatusGroup::InputMethod, modeActions_[1].get());
+        statusArea.addAction(StatusGroup::InputMethod, modeActions_[0].get());
+        statusArea.addAction(StatusGroup::InputMethod, modeActions_[2].get());
+        statusArea.addAction(StatusGroup::InputMethod, separatorAction_.get());
         for (const auto& action : toggleActions_) {
             statusArea.addAction(StatusGroup::InputMethod, action.get());
         }
@@ -628,27 +709,29 @@ private:
     }
 
     void onMenuActivated(HcImeMenuItem item, InputContext* ic) {
+        auto* inputConfig = config_.input.mutableValue();
+        auto* behaviorConfig = config_.behavior.mutableValue();
         switch (item) {
             case HcImeMenuItem::ModeTelex:
-                *config_.inputMode.mutableValue() = HcImeInputMode::Telex;
+                *inputConfig->inputMode.mutableValue() = HcImeInputMode::Telex;
                 break;
             case HcImeMenuItem::ModeVni:
-                *config_.inputMode.mutableValue() = HcImeInputMode::Vni;
+                *inputConfig->inputMode.mutableValue() = HcImeInputMode::Vni;
                 break;
             case HcImeMenuItem::ModeViqr:
-                *config_.inputMode.mutableValue() = HcImeInputMode::Viqr;
+                *inputConfig->inputMode.mutableValue() = HcImeInputMode::Viqr;
                 break;
             case HcImeMenuItem::LegacyTone:
-                *config_.legacyTone.mutableValue() = !*config_.legacyTone;
+                *inputConfig->legacyTone.mutableValue() = !*inputConfig->legacyTone;
                 break;
             case HcImeMenuItem::SpellCheck:
-                *config_.spellCheck.mutableValue() = !*config_.spellCheck;
+                *behaviorConfig->spellCheck.mutableValue() = !*behaviorConfig->spellCheck;
                 break;
             case HcImeMenuItem::AutoRestore:
-                *config_.autoRestore.mutableValue() = !*config_.autoRestore;
+                *behaviorConfig->autoRestore.mutableValue() = !*behaviorConfig->autoRestore;
                 break;
             case HcImeMenuItem::DisplayUnderline:
-                *config_.displayUnderline.mutableValue() = !*config_.displayUnderline;
+                *behaviorConfig->displayUnderline.mutableValue() = !*behaviorConfig->displayUnderline;
                 break;
         }
 
@@ -748,9 +831,8 @@ private:
     Instance* instance_ = nullptr;
     std::unordered_map<ICUUID, ContextState, IcuuidHash> contexts_;
     HcImeConfig config_;
-    std::unique_ptr<Menu> statusMenu_;
-    std::unique_ptr<SimpleAction> statusRootAction_;
     std::array<std::unique_ptr<SimpleAction>, 3> modeActions_;
+    std::unique_ptr<SimpleAction> separatorAction_;
     std::array<std::unique_ptr<SimpleAction>, 4> toggleActions_;
     std::vector<Connection> actionConnections_;
     std::vector<Action*> registeredActions_;
