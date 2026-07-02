@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::c_char;
 use std::time::Instant;
 
@@ -28,6 +29,7 @@ pub struct Session {
     pub last_spell_check_status: HCSpellCheckStatus,
     rendered_raw_len: usize,
     previous_rendered_raw_len: usize,
+    pub macros: HashMap<String, String>,
 }
 
 impl Session {
@@ -48,6 +50,7 @@ impl Session {
             last_spell_check_status: HCSpellCheckStatus::Valid,
             rendered_raw_len: 0,
             previous_rendered_raw_len: 0,
+            macros: HashMap::new(),
         }
     }
 
@@ -76,6 +79,7 @@ impl Session {
         } else {
             self.buffer = render_raw_input(&self.raw_buffer, self.mode, self.legacy_tone);
         }
+        mirror_raw_casing(&self.raw_buffer, &mut self.buffer);
         self.rendered_raw_len = raw_len;
         self.update_spell_check_status();
     }
@@ -125,6 +129,26 @@ impl Session {
         } else {
             self.raw_buffer.clone()
         };
+
+        // Check macro expansion: if the raw buffer matches a macro key,
+        // commit the expansion directly without spell-check.
+        let raw_lower = raw.trim().to_lowercase();
+        if let Some(expansion) = self.macros.get(&raw_lower) {
+            let expanded = expansion.clone();
+            self.last_commit = expanded.clone();
+            self.last_raw = raw.trim().to_string();
+            self.reconversion_active = false;
+            self.buffer.clear();
+            self.raw_buffer.clear();
+            self.last_commit_time = Some(Instant::now());
+
+            return crate::hc_state_from_string(
+                &expanded,
+                HCStatusFlag::Commit,
+                crate::types::HCErrorCode::None,
+            );
+        }
+
         let rendered = self.buffer.clone();
         let decision = resolve_commit_text(
             &raw,
@@ -146,6 +170,14 @@ impl Session {
             decision.status,
             crate::types::HCErrorCode::None,
         )
+    }
+
+    pub fn add_macro(&mut self, key: &str, value: &str) {
+        self.macros.insert(key.to_lowercase(), value.to_string());
+    }
+
+    pub fn clear_macros(&mut self) {
+        self.macros.clear();
     }
 
     pub fn can_edit_last_commit(&self) -> bool {
@@ -319,4 +351,42 @@ pub fn resolve_commit_text(
             status: HCStatusFlag::Commit,
         }
     }
+}
+
+/// Align the rendered buffer's casing to the raw input's dominant casing pattern.
+///
+/// * If the raw input has 2+ uppercase ASCII-alpha chars and zero lowercase
+///   ASCII-alpha chars, the entire rendered buffer is uppercased.
+/// * If only the first alphabetic char in raw is uppercase and the next is
+///   lowercase, the rendered buffer is title-cased (first char up, rest down).
+/// * Otherwise, the rendered buffer is left as-is (per-character casing from
+///   the transformation layer is already correct).
+fn mirror_raw_casing(raw: &str, rendered: &mut String) {
+    let raw_alphas: Vec<char> = raw.chars().filter(|ch| ch.is_ascii_alphabetic()).collect();
+    if raw_alphas.len() < 2 {
+        return; // Too few alpha characters to determine a pattern
+    }
+
+    let upper_count = raw_alphas.iter().filter(|ch| ch.is_uppercase()).count();
+    let lower_count = raw_alphas.iter().filter(|ch| ch.is_lowercase()).count();
+
+    if upper_count >= 2 && lower_count == 0 {
+        // ALL CAPS: e.g. "HOAF" → normalize rendered to uppercase
+        *rendered = rendered.to_uppercase();
+    } else if upper_count == 1
+        && raw_alphas[0].is_uppercase()
+        && raw_alphas[1..].iter().all(|ch| ch.is_lowercase())
+    {
+        // Strict Title Case: first alpha upper, ALL remaining alpha lowercase
+        // → title-case rendered (first char up, rest down)
+        let mut chars = rendered.chars();
+        if let Some(first) = chars.next() {
+            let mut result: String = first.to_uppercase().collect();
+            for ch in chars {
+                result.extend(ch.to_lowercase());
+            }
+            *rendered = result;
+        }
+    }
+    // Otherwise (mixed case like haNOI): leave per-character casing as-is
 }

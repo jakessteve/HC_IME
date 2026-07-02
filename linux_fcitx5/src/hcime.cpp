@@ -24,6 +24,7 @@
 #include <array>
 #include <cctype>
 #include <cstdlib>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -120,7 +121,8 @@ FCITX_CONFIGURATION(
     HcImeConfig,
     Option<HcImeInputConfig> input{this, "Input", "Input settings", {}};
     Option<HcImeBehaviorConfig> behavior{this, "Behavior", "Typing behavior", {}};
-    Option<HcImeDictionaryConfig> dictionary{this, "Dictionary", "Dictionary paths", {}};)
+    Option<HcImeDictionaryConfig> dictionary{this, "Dictionary", "Dictionary paths", {}};
+    Option<std::string> macroFilePath{this, "MacroFilePath", "Path to macro definitions file (key=value, one per line)", ""};)
 
 static void SetEnvIfNotEmpty(const char* name, const std::string& value) {
     if (!value.empty()) {
@@ -265,6 +267,52 @@ static void migrateLegacyConfig(RawConfig& config) {
     copyLegacyConfigValue(config, "EnglishDictionaryPath", "Dictionary/EnglishDictionaryPath");
 }
 
+static void loadMacrosIntoSession(void* session, const std::string& macroFilePath) {
+    if (session == nullptr || macroFilePath.empty()) {
+        return;
+    }
+
+    // Resolve ~ to home directory
+    std::string resolvedPath = macroFilePath;
+    if (!resolvedPath.empty() && resolvedPath[0] == '~') {
+        const char* home = getenv("HOME");
+        if (home != nullptr) {
+            resolvedPath = std::string(home) + resolvedPath.substr(1);
+        }
+    }
+
+    hc_session_clear_macros(session);
+    std::ifstream file(resolvedPath);
+    if (!file.is_open()) {
+        return;
+    }
+
+    std::string line;
+    while (std::getline(file, line)) {
+        // Skip empty lines and comments
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        // Find the first '=' separator
+        auto eqPos = line.find('=');
+        if (eqPos == std::string::npos || eqPos == 0) {
+            continue;
+        }
+        std::string key = line.substr(0, eqPos);
+        std::string value = line.substr(eqPos + 1);
+        // Trim whitespace from key and value
+        auto trim = [](std::string& s) {
+            while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
+            while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
+        };
+        trim(key);
+        trim(value);
+        if (!key.empty() && !value.empty()) {
+            hc_session_add_macro(session, key.c_str(), value.c_str());
+        }
+    }
+}
+
 }  // namespace
 
 class HcImeEngine final : public InputMethodEngineV2 {
@@ -405,6 +453,7 @@ public:
 
         if (state.session.ptr == nullptr) {
             state.session.ptr = hc_session_new(mode, 0);
+            loadMacrosIntoSession(state.session.ptr, *config_.macroFilePath);
         }
 
         HC_KeyResult result = hc_session_handle_key(state.session.ptr, &request);
@@ -458,6 +507,7 @@ public:
         auto& state = stateFor(event.inputContext());
         if (state.session.ptr == nullptr) {
             state.session.ptr = hc_session_new(toSessionInputMode(*config_.input->inputMode), 0);
+            loadMacrosIntoSession(state.session.ptr, *config_.macroFilePath);
         }
         attachStatusMenu(event.inputContext());
     }

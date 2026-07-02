@@ -308,6 +308,41 @@ pub extern "C" fn hc_session_reset(session: *mut std::ffi::c_void) {
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn hc_session_add_macro(
+    session: *mut std::ffi::c_void,
+    key: *const c_char,
+    value: *const c_char,
+) {
+    if session.is_null() || key.is_null() || value.is_null() {
+        return;
+    }
+    unsafe {
+        let session = &mut *(session as *mut Session);
+        let key_str = match CStr::from_ptr(key).to_str() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let value_str = match CStr::from_ptr(value).to_str() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        session.add_macro(key_str, value_str);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn hc_session_clear_macros(session: *mut std::ffi::c_void) {
+    if session.is_null() {
+        return;
+    }
+    unsafe {
+        let session = &mut *(session as *mut Session);
+        session.clear_macros();
+    }
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn hc_session_handle_key(
     session: *mut std::ffi::c_void,
     request: *const HC_KeyRequest,

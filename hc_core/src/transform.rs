@@ -77,6 +77,29 @@ pub fn apply_telex_w(buffer: &mut String) -> bool {
         }
     }
 
+    // Smart "ua" → "ưa": when the last two vowels form a contiguous "ua" pair
+    // and the "u" is NOT preceded by "q"/"Q" (the qu- glide), apply horn to
+    // "u" instead of letting the backward scan apply breve to "a".
+    if has_u && !has_o {
+        if let Some(u_idx) = chars
+            .iter()
+            .rposition(|ch| vowel_signature(*ch).is_some_and(|(f, _, _)| f == VowelFamily::PlainU))
+        {
+            let a_idx = u_idx + 1;
+            if a_idx < chars.len()
+                && vowel_signature(chars[a_idx]).is_some_and(|(f, _, _)| f == VowelFamily::PlainA)
+            {
+                let preceded_by_q = u_idx > 0 && matches!(chars[u_idx - 1], 'q' | 'Q');
+                if !preceded_by_q {
+                    let (_, uppercase, tone) = vowel_signature(chars[u_idx]).unwrap();
+                    chars[u_idx] = compose_vowel(VowelFamily::HornU, uppercase, tone);
+                    *buffer = chars.into_iter().collect();
+                    return true;
+                }
+            }
+        }
+    }
+
     for idx in (0..chars.len()).rev() {
         let replacement = match vowel_signature(chars[idx]) {
             Some((VowelFamily::PlainA, uppercase, tone)) => {

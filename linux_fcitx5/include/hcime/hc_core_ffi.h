@@ -114,6 +114,8 @@ void hc_state_free(HC_State* state);
 void* hc_session_new(int32_t input_mode, uint8_t legacy_tone);
 void hc_session_free(void* session);
 void hc_session_reset(void* session);
+void hc_session_add_macro(void* session, const char* key, const char* value);
+void hc_session_clear_macros(void* session);
 HC_KeyResult hc_session_handle_key(void* session, const HC_KeyRequest* request);
 
 #ifdef __cplusplus

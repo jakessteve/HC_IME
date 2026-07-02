@@ -861,6 +861,120 @@ fn telex_w_applies_breve_when_no_uo_pair() {
 }
 
 #[test]
+fn telex_w_smart_horn_ua_becomes_horn_u() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+
+    // "muaw" → "mưa" (horn on u, not breve on a)
+    assert_eq!(type_raw(session, &mut req, "muaw"), "mưa");
+    hc_session_reset(session);
+
+    // "xuaw" → "xưa" (same rule)
+    assert_eq!(type_raw(session, &mut req, "xuaw"), "xưa");
+    hc_session_reset(session);
+
+    // "quaw" → "quă" (qu glide exception: breve on a)
+    assert_eq!(type_raw(session, &mut req, "quaw"), "quă");
+    hc_session_reset(session);
+
+    // "luawr" → "lửa" (horn on u via w, then tone via r)
+    assert_eq!(type_raw(session, &mut req, "luawr"), "lửa");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn casing_preservation_all_caps_and_title_case() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+
+    // ALL CAPS: "MUAW" → "MƯA" (horn on Ư, not breve on A)
+    assert_eq!(type_raw(session, &mut req, "MUAW"), "MƯA");
+    hc_session_reset(session);
+
+    // Title case: "Muaw" → "Mưa" (horn on ư)
+    assert_eq!(type_raw(session, &mut req, "Muaw"), "Mưa");
+    hc_session_reset(session);
+
+    // ALL CAPS with tone: "HOAF" → "HOÀ"
+    assert_eq!(type_raw(session, &mut req, "HOAF"), "HOÀ");
+    hc_session_reset(session);
+
+    // Title case with circumflex: "Aas" → "Ấ"
+    assert_eq!(type_raw(session, &mut req, "Aas"), "Ấ");
+    hc_session_reset(session);
+
+    // ALL CAPS circumflex+tone: "AAS" → "Ấ" (uppercase)
+    assert_eq!(type_raw(session, &mut req, "AAS"), "Ấ");
+    hc_session_reset(session);
+
+    // ALL CAPS with ươ pair: "PHUONGW" → "PHƯƠNG"
+    assert_eq!(type_raw(session, &mut req, "PHUONGW"), "PHƯƠNG");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn casing_normalization_erratic_mixed_case_not_forced() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+
+    // Mixed case like "HaNoi" (H upper, a lower, N upper) → not a uniform
+    // pattern, so per-character casing is preserved
+    assert_eq!(type_raw(session, &mut req, "HaNoif"), "HaNoì");
+    hc_session_reset(session);
+
+    // True Title Case: "Tieeengs" → "Tiếng" (first upper, all rest lower)
+    assert_eq!(type_raw(session, &mut req, "Tieengs"), "Tiếng");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn macro_expansion_replaces_raw_key_on_commit() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+
+    // Register a macro
+    let macro_key = c("vn");
+    let macro_val = c("Việt Nam");
+    hc_session_add_macro(session, macro_key.as_ptr(), macro_val.as_ptr());
+
+    // Type "vn" and commit with space
+    assert_eq!(type_raw(session, &mut req, "vn"), "vn");
+    let (committed, status) = commit_with_space(session, &mut req);
+    assert_eq!(committed, "Việt Nam");
+    assert_eq!(status, HCStatusFlag::Commit as i32);
+
+    // Non-macro word goes through normal processing
+    assert_eq!(type_raw(session, &mut req, "hoaf"), "hoà");
+    let (committed, _) = commit_with_space(session, &mut req);
+    assert_eq!(committed, "hoà");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn clear_macros_removes_all_registered_macros() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+
+    let macro_key = c("vn");
+    let macro_val = c("Việt Nam");
+    hc_session_add_macro(session, macro_key.as_ptr(), macro_val.as_ptr());
+
+    // Clear macros
+    hc_session_clear_macros(session);
+
+    // Now "vn" should NOT expand
+    assert_eq!(type_raw(session, &mut req, "vn"), "vn");
+    let (committed, _) = commit_with_space(session, &mut req);
+    assert_eq!(committed, "vn");
+
+    hc_session_free(session);
+}
+
+#[test]
 fn backspace_deletes_visible_char_in_vni_mode() {
     let session = hc_session_new(InputMode::Vni as i32, 0);
     let mut req = key_request(InputMode::Vni);
