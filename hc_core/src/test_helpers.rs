@@ -32,6 +32,10 @@ pub fn key_request(mode: InputMode) -> HC_KeyRequest {
         legacy_tone: 0,
         spell_check: 1,
         auto_restore: 1,
+        quick_consonants: 0,
+        english_protection: 0,
+        macro_in_english: 0,
+        esc_restore_raw: 0,
     }
 }
 

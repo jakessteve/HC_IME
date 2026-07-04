@@ -16,6 +16,12 @@ desktop input method:
 - optional Vietnamese and English dictionary lookups
 - native Fcitx5 configuration and status-area controls
 - shared-library delivery through a small C FFI surface
+- quick consonant expansion (cc→ch, f→ph, etc.)
+- 3-tier English protection (Off/Soft/Hard)
+- macro expansion with English-mode support
+- ESC restore raw keystrokes
+- per-application exclusion and smart switch
+- non-preedit surrounding-text output mode
 
 ## Architecture
 
@@ -26,14 +32,19 @@ graph TD
     E -->|C FFI| R[hc_core/libhc_core.so]
     R --> S[Session and composition state]
     S --> T[Telex / VNI / VIQR transforms]
+    S --> Q[Quick consonant expansion]
     S --> L[Vietnamese and English scoring]
+    S --> EP[3-tier English protection]
+    S --> M[Macro expansion]
     S --> C[Commit or preedit state]
     C --> F
 
     E --> G[Native config panel]
-    G --> M[Input method and behavior toggles]
-    E --> P[Status-area actions]
-    P --> M
+    G --> MI[Input settings]
+    G --> BT[Typing behavior]
+    G --> PA[Per-app settings]
+    G --> OP[Output settings]
+    G --> DP[Dictionary paths]
 
     E --> I[Installed Fcitx5 metadata]
     I --> J[hcime.conf and the single HC_IME input-method entry]
@@ -46,7 +57,8 @@ The data flow is intentionally narrow:
 
 1. Fcitx5 delivers key events to the addon.
 2. The C++ addon translates those events into the Rust request/state ABI.
-3. The Rust core renders the composition, applies mode-specific transforms, and
+3. The Rust core renders the composition, applies mode-specific transforms,
+   quick consonant expansion, English protection, and macro expansion, then
    decides whether to keep the preedit or commit raw text.
 4. The addon reflects that state back into Fcitx5, along with config and status
    actions for the user.
@@ -68,11 +80,18 @@ The Rust engine currently handles:
 - invalid-sequence recovery and undo/reconversion behavior
 - spell-check status tracking for valid, invalid, and English-fallback cases
 - raw and composed commit decisions through the exported ABI
+- quick consonant expansion (cc→ch, gg→gi, nn→ng, uu→ư, f→ph, j→gi, w→qu)
+- 3-tier English protection (hard clusters, soft patterns, user override)
+- macro expansion with English-mode toggle
+- ESC restore raw keystrokes
 
 The Fcitx5 addon currently provides:
 
 - one primary `HC_IME` input method
 - a native configuration panel for behavior toggles and dictionary paths
+- per-application exclusion and forced Vietnamese mode lists
+- smart switch (per-app mode memory)
+- output mode selection (preedit or surrounding-text)
 - status-area actions that mirror the same runtime switches
 
 ## Build
@@ -107,6 +126,8 @@ The generated HC_IME settings panel is grouped into clear sections:
 - `Input settings`
 - `Typing behavior`
 - `Dictionary paths`
+- `Per-application settings`
+- `Output settings`
 
 Inside those sections, you will find:
 
@@ -115,8 +136,17 @@ Inside those sections, you will find:
 - `Validate Vietnamese words with dictionaries and rules`
 - `Restore invalid Vietnamese sequences to raw keystrokes`
 - `Underline the preedit text`
+- `Enable quick consonant expansion`
+- `English protection level` (Off/Soft/Hard)
+- `Allow macro expansion in English mode`
+- `ESC key restores raw keystrokes`
 - `Vietnamese dictionary path`
 - `English dictionary path`
+- `Excluded apps` (forced English)
+- `Forced Vietnamese apps`
+- `Smart switch` (remember per-app mode)
+- `Output mode` (Preedit/SurroundingText)
+- `Macro file path`
 
 To keep Bamboo installed while using HC_IME as the default Vietnamese typing
 path, set the Fcitx5 profile default to `hcime` and leave `bamboo` in the same

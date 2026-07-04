@@ -3,10 +3,12 @@ use std::ffi::c_char;
 use std::time::Instant;
 
 use crate::language::{is_viqr_trigger, language_scores};
+use crate::quick_consonants;
 use crate::transform::{
     apply_breve, apply_circumflex, apply_d_stroke, apply_double_tap, apply_horn, apply_telex_w,
     apply_tone,
 };
+use crate::types::EnglishProtectionLevel;
 use crate::types::{CommitDecision, HCSpellCheckStatus, HCStatusFlag, HC_State, InputMode, Tone};
 use crate::vowel::strip_all_marks;
 
@@ -30,6 +32,12 @@ pub struct Session {
     rendered_raw_len: usize,
     previous_rendered_raw_len: usize,
     pub macros: HashMap<String, String>,
+    pub quick_consonants_enabled: bool,
+    pub english_protection: EnglishProtectionLevel,
+    pub macro_in_english: bool,
+    pub esc_restore_raw: bool,
+    pub committed_raw_history: Vec<String>,
+    pub quick_consonant_lock: usize,
 }
 
 impl Session {
@@ -51,6 +59,12 @@ impl Session {
             rendered_raw_len: 0,
             previous_rendered_raw_len: 0,
             macros: HashMap::new(),
+            quick_consonants_enabled: false,
+            english_protection: EnglishProtectionLevel::Off,
+            macro_in_english: false,
+            esc_restore_raw: false,
+            committed_raw_history: Vec::new(),
+            quick_consonant_lock: 0,
         }
     }
 
@@ -66,6 +80,7 @@ impl Session {
         self.rendered_raw_len = self.previous_rendered_raw_len;
         self.rendered_raw_len = 0;
         self.previous_rendered_raw_len = 0;
+        self.quick_consonant_lock = 0;
     }
 
     pub fn render_from_raw(&mut self) {
@@ -79,9 +94,34 @@ impl Session {
         } else {
             self.buffer = render_raw_input(&self.raw_buffer, self.mode, self.legacy_tone);
         }
+        if self.quick_consonants_enabled {
+            self.apply_quick_consonants();
+        }
         mirror_raw_casing(&self.raw_buffer, &mut self.buffer);
-        self.rendered_raw_len = raw_len;
+        self.rendered_raw_len = self.raw_buffer.len();
         self.update_spell_check_status();
+    }
+
+    fn apply_quick_consonants(&mut self) {
+        quick_consonants::apply_mid_word_quick_consonants(
+            &mut self.raw_buffer,
+            &mut self.quick_consonant_lock,
+        );
+        quick_consonants::apply_start_quick_consonants(
+            &mut self.raw_buffer,
+            &mut self.quick_consonant_lock,
+        );
+        self.buffer = render_raw_input(&self.raw_buffer, self.mode, self.legacy_tone);
+    }
+
+    pub fn apply_end_quick_consonants_if_enabled(&mut self) {
+        if self.quick_consonants_enabled {
+            quick_consonants::apply_end_quick_consonants(
+                &mut self.raw_buffer,
+                &mut self.quick_consonant_lock,
+            );
+            self.buffer = render_raw_input(&self.raw_buffer, self.mode, self.legacy_tone);
+        }
     }
 
     pub fn update_spell_check_status(&mut self) {
@@ -97,6 +137,21 @@ impl Session {
         };
 
         let scores = language_scores(&raw, &self.buffer, self.mode, self.spell_check);
+
+        if self.english_protection == EnglishProtectionLevel::Hard
+            && crate::language::is_hard_english_raw_start(&raw)
+        {
+            self.last_spell_check_status = HCSpellCheckStatus::EnglishFallback;
+            return;
+        }
+        if matches!(
+            self.english_protection,
+            EnglishProtectionLevel::Hard | EnglishProtectionLevel::Soft
+        ) && crate::language::is_soft_english_pattern(&raw)
+        {
+            self.last_spell_check_status = HCSpellCheckStatus::EnglishFallback;
+            return;
+        }
 
         if scores.english > scores.vietnamese {
             self.last_spell_check_status = HCSpellCheckStatus::EnglishFallback;
@@ -130,23 +185,30 @@ impl Session {
             self.raw_buffer.clone()
         };
 
-        // Check macro expansion: if the raw buffer matches a macro key,
-        // commit the expansion directly without spell-check.
         let raw_lower = raw.trim().to_lowercase();
-        if let Some(expansion) = self.macros.get(&raw_lower) {
-            let expanded = expansion.clone();
-            self.last_commit = expanded.clone();
-            self.last_raw = raw.trim().to_string();
-            self.reconversion_active = false;
-            self.buffer.clear();
-            self.raw_buffer.clear();
-            self.last_commit_time = Some(Instant::now());
-
-            return crate::hc_state_from_string(
-                &expanded,
-                HCStatusFlag::Commit,
-                crate::types::HCErrorCode::None,
-            );
+        let macro_match = self.macros.get(&raw_lower).cloned();
+        if let Some(expansion) = macro_match {
+            let should_expand =
+                if self.last_spell_check_status == HCSpellCheckStatus::EnglishFallback {
+                    self.macro_in_english
+                } else {
+                    true
+                };
+            if should_expand {
+                self.committed_raw_history.push(raw.trim().to_string());
+                self.last_commit = expansion.clone();
+                self.last_raw = raw.trim().to_string();
+                self.reconversion_active = false;
+                self.buffer.clear();
+                self.raw_buffer.clear();
+                self.last_commit_time = Some(Instant::now());
+                self.quick_consonant_lock = 0;
+                return crate::hc_state_from_string(
+                    &expansion,
+                    HCStatusFlag::Commit,
+                    crate::types::HCErrorCode::None,
+                );
+            }
         }
 
         let rendered = self.buffer.clone();
@@ -158,12 +220,14 @@ impl Session {
             self.auto_restore,
         );
 
+        self.committed_raw_history.push(raw.trim().to_string());
         self.last_commit = decision.text.clone();
         self.last_raw = raw.trim().to_string();
         self.reconversion_active = false;
         self.buffer.clear();
         self.raw_buffer.clear();
         self.last_commit_time = Some(Instant::now());
+        self.quick_consonant_lock = 0;
 
         crate::hc_state_from_string(
             &decision.text,
@@ -223,6 +287,18 @@ impl Session {
         self.raw_buffer.push(ch);
         self.render_from_raw();
         true
+    }
+
+    pub fn try_esc_restore_raw(&mut self) -> Option<String> {
+        if !self.esc_restore_raw {
+            return None;
+        }
+        if !self.buffer.is_empty() && !self.raw_buffer.is_empty() {
+            let raw = self.raw_buffer.clone();
+            self.reset();
+            return Some(raw);
+        }
+        None
     }
 }
 
@@ -353,32 +429,21 @@ pub fn resolve_commit_text(
     }
 }
 
-/// Align the rendered buffer's casing to the raw input's dominant casing pattern.
-///
-/// * If the raw input has 2+ uppercase ASCII-alpha chars and zero lowercase
-///   ASCII-alpha chars, the entire rendered buffer is uppercased.
-/// * If only the first alphabetic char in raw is uppercase and the next is
-///   lowercase, the rendered buffer is title-cased (first char up, rest down).
-/// * Otherwise, the rendered buffer is left as-is (per-character casing from
-///   the transformation layer is already correct).
 fn mirror_raw_casing(raw: &str, rendered: &mut String) {
     let raw_alphas: Vec<char> = raw.chars().filter(|ch| ch.is_ascii_alphabetic()).collect();
     if raw_alphas.len() < 2 {
-        return; // Too few alpha characters to determine a pattern
+        return;
     }
 
     let upper_count = raw_alphas.iter().filter(|ch| ch.is_uppercase()).count();
     let lower_count = raw_alphas.iter().filter(|ch| ch.is_lowercase()).count();
 
     if upper_count >= 2 && lower_count == 0 {
-        // ALL CAPS: e.g. "HOAF" → normalize rendered to uppercase
         *rendered = rendered.to_uppercase();
     } else if upper_count == 1
         && raw_alphas[0].is_uppercase()
         && raw_alphas[1..].iter().all(|ch| ch.is_lowercase())
     {
-        // Strict Title Case: first alpha upper, ALL remaining alpha lowercase
-        // → title-case rendered (first char up, rest down)
         let mut chars = rendered.chars();
         if let Some(first) = chars.next() {
             let mut result: String = first.to_uppercase().collect();
@@ -388,5 +453,4 @@ fn mirror_raw_casing(raw: &str, rendered: &mut String) {
             *rendered = result;
         }
     }
-    // Otherwise (mixed case like haNOI): leave per-character casing as-is
 }

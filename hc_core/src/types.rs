@@ -42,6 +42,10 @@ pub struct HC_KeyRequest {
     pub legacy_tone: u8,
     pub spell_check: u8,
     pub auto_restore: u8,
+    pub quick_consonants: u8,
+    pub english_protection: u8,
+    pub macro_in_english: u8,
+    pub esc_restore_raw: u8,
 }
 
 #[repr(C)]
@@ -66,6 +70,7 @@ pub enum HCStatusFlag {
     Commit = 1,
     EnglishFallback = 2,
     ReconversionActive = 3,
+    EscRestoredRaw = 4,
 }
 
 #[repr(i32)]
@@ -145,6 +150,23 @@ pub enum Tone {
     Hoi,
     Nga,
     Nang,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnglishProtectionLevel {
+    Off = 0,
+    Soft = 1,
+    Hard = 2,
+}
+
+impl From<u8> for EnglishProtectionLevel {
+    fn from(value: u8) -> Self {
+        match value {
+            1 => EnglishProtectionLevel::Soft,
+            2 => EnglishProtectionLevel::Hard,
+            _ => EnglishProtectionLevel::Off,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

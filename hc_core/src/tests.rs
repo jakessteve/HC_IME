@@ -14,6 +14,10 @@ fn telex_simple_tone_and_cancel() {
         legacy_tone: 0,
         spell_check: 1,
         auto_restore: 1,
+        quick_consonants: 0,
+        english_protection: 0,
+        macro_in_english: 0,
+        esc_restore_raw: 0,
     };
     let res = hc_session_handle_key(session, &req);
     assert_eq!(read_and_free(res.state), "h");
@@ -61,6 +65,10 @@ fn vni_triggers_and_literal_numbers() {
         legacy_tone: 0,
         spell_check: 1,
         auto_restore: 1,
+        quick_consonants: 0,
+        english_protection: 0,
+        macro_in_english: 0,
+        esc_restore_raw: 0,
     };
     free_state(hc_session_handle_key(session, &req).state);
     let r = c("r");
@@ -181,6 +189,10 @@ fn session_backspace_rehydrates_after_commit() {
         legacy_tone: 0,
         spell_check: 1,
         auto_restore: 1,
+        quick_consonants: 0,
+        english_protection: 0,
+        macro_in_english: 0,
+        esc_restore_raw: 0,
     };
     for ch in ["h", "o", "a", "f"] {
         let key = c(ch);
@@ -934,19 +946,18 @@ fn casing_normalization_erratic_mixed_case_not_forced() {
 fn macro_expansion_replaces_raw_key_on_commit() {
     let session = hc_session_new(InputMode::Telex as i32, 0);
     let mut req = key_request(InputMode::Telex);
+    req.macro_in_english = 1;
 
-    // Register a macro
     let macro_key = c("vn");
     let macro_val = c("Việt Nam");
     hc_session_add_macro(session, macro_key.as_ptr(), macro_val.as_ptr());
 
-    // Type "vn" and commit with space
     assert_eq!(type_raw(session, &mut req, "vn"), "vn");
     let (committed, status) = commit_with_space(session, &mut req);
     assert_eq!(committed, "Việt Nam");
     assert_eq!(status, HCStatusFlag::Commit as i32);
 
-    // Non-macro word goes through normal processing
+    hc_session_reset(session);
     assert_eq!(type_raw(session, &mut req, "hoaf"), "hoà");
     let (committed, _) = commit_with_space(session, &mut req);
     assert_eq!(committed, "hoà");
@@ -1070,6 +1081,231 @@ fn telex_backspace_deletes_one_raw_character() {
     req.text = ptr::null();
     let back = hc_session_handle_key(session, &req);
     assert_eq!(read_and_free(back.state), "u");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn quick_consonants_mid_word_cc_to_ch() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    req.quick_consonants = 1;
+
+    assert_eq!(type_raw(session, &mut req, "cc"), "ch");
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "cco"), "cho");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn quick_consonants_mid_word_nn_to_ng() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    req.quick_consonants = 1;
+
+    assert_eq!(type_raw(session, &mut req, "nn"), "ng");
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "nna"), "nga");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn quick_consonants_mid_word_gg_to_gi() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    req.quick_consonants = 1;
+
+    assert_eq!(type_raw(session, &mut req, "gg"), "gi");
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "gga"), "gia");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn quick_consonants_mid_word_uu_to_uo() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    req.quick_consonants = 1;
+
+    let result = type_raw(session, &mut req, "uu");
+    assert!(result.contains('ư'));
+
+    hc_session_free(session);
+}
+
+#[test]
+fn quick_consonants_start_f_to_ph() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    req.quick_consonants = 1;
+
+    assert_eq!(type_raw(session, &mut req, "fo"), "pho");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn quick_consonants_start_j_to_gi() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    req.quick_consonants = 1;
+
+    assert_eq!(type_raw(session, &mut req, "ja"), "gia");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn quick_consonants_start_w_to_qu() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    req.quick_consonants = 1;
+
+    assert_eq!(type_raw(session, &mut req, "wa"), "qua");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn quick_consonants_end_g_to_ng() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    req.quick_consonants = 1;
+
+    assert_eq!(type_raw(session, &mut req, "tag"), "tag");
+    let (committed, _) = commit_with_space(session, &mut req);
+    assert_eq!(committed, "tang");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn quick_consonants_disabled_by_default() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    req.quick_consonants = 0;
+
+    assert_eq!(type_raw(session, &mut req, "cc"), "cc");
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "fo"), "fo");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn english_protection_hard_rejects_impossible_starts() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    req.english_protection = 2;
+
+    assert_eq!(type_raw(session, &mut req, "cl"), "cl");
+
+    let key = c("o");
+    req.text = key.as_ptr();
+    let result = hc_session_handle_key(session, &req);
+    assert_eq!(
+        result.state.spell_check_status,
+        HCSpellCheckStatus::EnglishFallback as i32
+    );
+    free_state(result.state);
+
+    hc_session_free(session);
+}
+
+#[test]
+fn english_protection_soft_rejects_y_vowel() {
+    assert!(language::is_soft_english_pattern("ya"));
+    assert!(language::is_soft_english_pattern("ye"));
+    assert!(!language::is_soft_english_pattern("y"));
+    assert!(!language::is_soft_english_pattern("abc"));
+}
+
+#[test]
+fn english_protection_off_allows_all() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    req.english_protection = 0;
+
+    assert_eq!(type_raw(session, &mut req, "cl"), "cl");
+
+    let key = c("o");
+    req.text = key.as_ptr();
+    let result = hc_session_handle_key(session, &req);
+    free_state(result.state);
+
+    hc_session_free(session);
+}
+
+#[test]
+fn macro_expands_in_english_mode_when_enabled() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    req.macro_in_english = 1;
+
+    let macro_key = c("vn");
+    let macro_val = c("Việt Nam");
+    hc_session_add_macro(session, macro_key.as_ptr(), macro_val.as_ptr());
+
+    assert_eq!(type_raw(session, &mut req, "vn"), "vn");
+    let (committed, status) = commit_with_space(session, &mut req);
+    assert_eq!(committed, "Việt Nam");
+    assert_eq!(status, HCStatusFlag::Commit as i32);
+
+    hc_session_free(session);
+}
+
+#[test]
+fn macro_does_not_expand_in_english_mode_when_disabled() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    req.macro_in_english = 0;
+
+    let macro_key = c("vn");
+    let macro_val = c("Việt Nam");
+    hc_session_add_macro(session, macro_key.as_ptr(), macro_val.as_ptr());
+
+    assert_eq!(type_raw(session, &mut req, "vn"), "vn");
+    let (committed, _) = commit_with_space(session, &mut req);
+    assert_eq!(committed, "vn");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn esc_restore_raw_returns_raw_keystrokes() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    req.esc_restore_raw = 1;
+
+    assert_eq!(type_raw(session, &mut req, "vis"), "ví");
+
+    req.kind = HCKeyKind::Escape as i32;
+    req.text = ptr::null();
+    let result = hc_session_handle_key(session, &req);
+    assert_eq!(
+        result.state.status_flag,
+        HCStatusFlag::EscRestoredRaw as i32
+    );
+    assert_eq!(read_and_free(result.state), "vis");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn esc_without_restore_flag_resets_normally() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    req.esc_restore_raw = 0;
+
+    assert_eq!(type_raw(session, &mut req, "vis"), "ví");
+
+    req.kind = HCKeyKind::Escape as i32;
+    req.text = ptr::null();
+    let result = hc_session_handle_key(session, &req);
+    assert_eq!(read_and_free(result.state), "");
 
     hc_session_free(session);
 }

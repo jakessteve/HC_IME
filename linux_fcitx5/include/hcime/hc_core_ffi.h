@@ -41,6 +41,10 @@ typedef struct HC_KeyRequest {
     uint8_t legacy_tone;
     uint8_t spell_check;
     uint8_t auto_restore;
+    uint8_t quick_consonants;
+    uint8_t english_protection;
+    uint8_t macro_in_english;
+    uint8_t esc_restore_raw;
 } HC_KeyRequest;
 
 typedef struct HC_KeyResult {
@@ -53,6 +57,7 @@ enum HC_StatusFlag {
     HC_STATUS_COMMIT = 1,
     HC_STATUS_ENGLISH_FALLBACK = 2,
     HC_STATUS_RECONVERSION_ACTIVE = 3,
+    HC_STATUS_ESC_RESTORED_RAW = 4,
 };
 
 enum HC_SpellCheckStatus {

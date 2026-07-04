@@ -2,6 +2,7 @@ use std::ffi::{c_char, CStr};
 use std::ptr;
 
 mod language;
+mod quick_consonants;
 mod session;
 mod transform;
 mod types;
@@ -17,6 +18,7 @@ pub use types::*;
 use language::is_known_english_word;
 use session::{render_raw_input, vni_digit_transforms_buffer, Session};
 use transform::{apply_circumflex, apply_telex_w, apply_tone_to_word};
+
 use vowel::strip_all_marks;
 
 impl Session {
@@ -33,6 +35,10 @@ impl Session {
         self.legacy_tone = request.legacy_tone != 0;
         self.spell_check = request.spell_check != 0;
         self.auto_restore = request.auto_restore != 0;
+        self.quick_consonants_enabled = request.quick_consonants != 0;
+        self.english_protection = EnglishProtectionLevel::from(request.english_protection);
+        self.macro_in_english = request.macro_in_english != 0;
+        self.esc_restore_raw = request.esc_restore_raw != 0;
 
         if let Some(kind) = key_kind(request.kind) {
             match kind {
@@ -43,6 +49,16 @@ impl Session {
                     };
                 }
                 HCKeyKind::Escape => {
+                    if let Some(raw) = self.try_esc_restore_raw() {
+                        return HC_KeyResult {
+                            state: hc_state_from_string(
+                                &raw,
+                                HCStatusFlag::EscRestoredRaw,
+                                HCErrorCode::None,
+                            ),
+                            handled: 1,
+                        };
+                    }
                     if self.buffer.is_empty() && self.last_commit.is_empty() {
                         return HC_KeyResult {
                             state: hc_error_state(HCErrorCode::None),
@@ -72,6 +88,10 @@ impl Session {
                             }
                             _ => {
                                 self.raw_buffer.pop();
+                                if self.quick_consonants_enabled {
+                                    self.quick_consonant_lock =
+                                        self.quick_consonant_lock.min(self.raw_buffer.len());
+                                }
                                 self.render_from_raw();
                             }
                         }
@@ -121,6 +141,8 @@ impl Session {
                     {
                         return self.emit_preedit(true);
                     }
+
+                    self.apply_end_quick_consonants_if_enabled();
 
                     let commit = self.commit_current();
                     return HC_KeyResult {

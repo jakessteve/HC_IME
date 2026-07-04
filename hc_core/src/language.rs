@@ -478,6 +478,32 @@ const VIETNAMESE_VOWEL_CLUSTERS: &[&str] = &[
     "uou", "uy", "uya", "uye", "uyu", "uu", "y", "ye", "yeu",
 ];
 
+pub fn is_hard_english_raw_start(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    let chars: Vec<char> = lower.chars().collect();
+    if chars.len() < 2 {
+        return false;
+    }
+    let impossible_starts = [
+        "cl", "cr", "br", "bl", "dr", "fr", "fl", "gr", "gl", "pr", "pl", "sm", "sn", "sp", "sw",
+        "st", "sc", "sk", "sl", "wh", "wr", "kn", "pn", "ps",
+    ];
+    let two_char: String = chars[..2].iter().collect();
+    if impossible_starts.iter().any(|&s| two_char == s) {
+        return true;
+    }
+    false
+}
+
+pub fn is_soft_english_pattern(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    let chars: Vec<char> = lower.chars().collect();
+    if chars.len() >= 2 && chars[0] == 'y' && matches!(chars[1], 'a' | 'e' | 'i' | 'o' | 'u') {
+        return true;
+    }
+    false
+}
+
 pub fn is_viqr_trigger(ch: char) -> bool {
     matches!(ch, '\'' | '`' | '?' | '~' | '.' | '^' | '+' | '(')
 }
