@@ -89,11 +89,12 @@ int main() {
         InputContextEvent activateEvent(&ic, EventType::InputContextInputMethodActivated);
         engine.activate(entry, activateEvent);
         const auto actions = hcimeStatusActions(ic);
-        require(actions.size() == 11, "status menu exposes three modes, a separator, and seven behavior toggles");
+        require(actions.size() == 12, "status menu exposes three modes, a separator, settings, and seven behavior toggles");
         require(actions[0]->shortText(&ic) == "VNI", "status menu includes VNI mode");
         require(actions[1]->shortText(&ic) == "TELEX", "status menu includes Telex mode");
         require(actions[2]->shortText(&ic) == "VIQR", "status menu includes VIQR mode");
         require(actions[3]->isSeparator(), "status menu separates mode and behavior groups");
+        require(actions[4]->shortText(&ic) == "Settings", "status menu includes a settings launcher");
         require(actions[1]->isChecked(&ic), "Telex mode is checked by default");
 
         require(send(engine, entry, ic, FcitxKey_a), "a accepted");

@@ -21,6 +21,8 @@ cleanup and documentation sync.
   Telex/VNI/VIQR mode and behavior toggles.
 - Native Fcitx5 config controls input mode, legacy tone placement, spell
   check, auto-restore, underline behavior, and dictionary paths.
+- The status menu includes a `Settings` launcher that opens the native Fcitx5
+  configuration tool for HC_IME.
 - External dictionary lookups reload when `HC_IME_VI_DICT` or `HC_IME_EN_DICT`
   changes, so config updates do not stay pinned to the first loaded file.
 - The smoke script verifies Rust tests, addon build/install, metadata, shared

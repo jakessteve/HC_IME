@@ -120,6 +120,7 @@ enum class HcImeMenuItem {
     ModeTelex,
     ModeVni,
     ModeViqr,
+    OpenSettings,
     LegacyTone,
     SpellCheck,
     AutoRestore,
@@ -596,6 +597,12 @@ public:
     }
 
 private:
+    void openSettings() {
+        if (instance_ != nullptr) {
+            instance_->configure();
+        }
+    }
+
     HC_KeyRequest makeKeyRequest(int32_t kind, const char* text, int32_t mode) {
         return HC_KeyRequest{
             kind, text, mode,
@@ -734,6 +741,14 @@ private:
                 [this, item](InputContext* ic) { onMenuActivated(item, ic); }));
             return action;
         };
+        auto addCommandAction = [this](const std::string& text, HcImeMenuItem item, const std::string& tooltip) {
+            auto action = std::make_unique<SimpleAction>();
+            action->setShortText(text);
+            action->setLongText(tooltip);
+            actionConnections_.push_back(action->connect<SimpleAction::Activated>(
+                [this, item](InputContext* ic) { onMenuActivated(item, ic); }));
+            return action;
+        };
         auto addSeparatorAction = [this]() {
             auto action = std::make_unique<SimpleAction>();
             action->setSeparator(true);
@@ -744,6 +759,7 @@ private:
         modeActions_[0] = addToggleAction("TELEX", HcImeMenuItem::ModeTelex, "Switch to Telex");
         modeActions_[2] = addToggleAction("VIQR", HcImeMenuItem::ModeViqr, "Switch to VIQR");
         separatorAction_ = addSeparatorAction();
+        settingsAction_ = addCommandAction("Settings", HcImeMenuItem::OpenSettings, "Open HC_IME settings");
         toggleActions_[0] = addToggleAction("Legacy tone", HcImeMenuItem::LegacyTone, "Toggle legacy tone placement");
         toggleActions_[1] = addToggleAction("Spell check", HcImeMenuItem::SpellCheck, "Toggle Vietnamese word validation");
         toggleActions_[2] = addToggleAction("Auto restore", HcImeMenuItem::AutoRestore, "Toggle raw-keystroke restore");
@@ -766,6 +782,7 @@ private:
         registerStatusAction("hcime-mode-vni", modeActions_[1].get());
         registerStatusAction("hcime-mode-viqr", modeActions_[2].get());
         registerStatusAction("hcime-mode-separator", separatorAction_.get());
+        registerStatusAction("hcime-open-settings", settingsAction_.get());
         registerStatusAction("hcime-toggle-legacy-tone", toggleActions_[0].get());
         registerStatusAction("hcime-toggle-spell-check", toggleActions_[1].get());
         registerStatusAction("hcime-toggle-auto-restore", toggleActions_[2].get());
@@ -801,6 +818,7 @@ private:
         statusArea.addAction(StatusGroup::InputMethod, modeActions_[0].get());
         statusArea.addAction(StatusGroup::InputMethod, modeActions_[2].get());
         statusArea.addAction(StatusGroup::InputMethod, separatorAction_.get());
+        statusArea.addAction(StatusGroup::InputMethod, settingsAction_.get());
         for (const auto& action : toggleActions_) statusArea.addAction(StatusGroup::InputMethod, action.get());
         ic->updateUserInterface(UserInterfaceComponent::StatusArea, true);
     }
@@ -812,6 +830,7 @@ private:
             case HcImeMenuItem::ModeTelex: *inputConfig->inputMode.mutableValue() = HcImeInputMode::Telex; break;
             case HcImeMenuItem::ModeVni: *inputConfig->inputMode.mutableValue() = HcImeInputMode::Vni; break;
             case HcImeMenuItem::ModeViqr: *inputConfig->inputMode.mutableValue() = HcImeInputMode::Viqr; break;
+            case HcImeMenuItem::OpenSettings: openSettings(); break;
             case HcImeMenuItem::LegacyTone: *inputConfig->legacyTone.mutableValue() = !*inputConfig->legacyTone; break;
             case HcImeMenuItem::SpellCheck: *behaviorConfig->spellCheck.mutableValue() = !*behaviorConfig->spellCheck; break;
             case HcImeMenuItem::AutoRestore: *behaviorConfig->autoRestore.mutableValue() = !*behaviorConfig->autoRestore; break;
@@ -901,6 +920,7 @@ private:
     HcImeConfig config_;
     std::array<std::unique_ptr<SimpleAction>, 3> modeActions_;
     std::unique_ptr<SimpleAction> separatorAction_;
+    std::unique_ptr<SimpleAction> settingsAction_;
     std::array<std::unique_ptr<SimpleAction>, 7> toggleActions_;
     std::vector<Connection> actionConnections_;
     std::vector<Action*> registeredActions_;

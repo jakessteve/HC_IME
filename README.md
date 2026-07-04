@@ -121,6 +121,9 @@ Open the Fcitx5 configuration UI with:
 fcitx5-configtool
 ```
 
+HC_IME also exposes a `Settings` entry in its status menu that opens the native
+Fcitx5 configuration tool.
+
 The generated HC_IME settings panel is grouped into clear sections:
 
 - `Input settings`
