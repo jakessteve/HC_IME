@@ -53,13 +53,11 @@ nm -D "$CORE" | grep -q 'hc_session_handle_key'
 nm -D "$CORE" | grep -q 'hc_compose_with_request'
 nm -D "$CORE" | grep -q 'hc_rehydrate_apply'
 grep -a -q 'HC_IME' "$ADDON"
-grep -a -q 'Toggle legacy tone placement' "$ADDON"
 grep -a -q 'Toggle Vietnamese word validation' "$ADDON"
 grep -a -q 'Toggle raw-keystroke restore' "$ADDON"
 grep -a -q 'Toggle preedit underline' "$ADDON"
 grep -a -q 'hcime-toggle-spell-check' "$ADDON"
 grep -a -q 'hcime-toggle-preedit-underline' "$ADDON"
-grep -a -q 'hcime-open-settings' "$ADDON"
 grep -a -q 'hcime-mode-telex' "$ADDON"
 grep -a -q 'hcime-mode-vni' "$ADDON"
 grep -a -q 'hcime-mode-viqr' "$ADDON"
