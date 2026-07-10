@@ -55,6 +55,17 @@ pub struct HC_KeyResult {
     pub handled: u8,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HC_Utf8KeyResult {
+    pub composition_string: *const c_char,
+    pub length: usize,
+    pub status_flag: i32,
+    pub error_code: i32,
+    pub spell_check_status: i32,
+    pub handled: u8,
+}
+
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HCSpellCheckStatus {

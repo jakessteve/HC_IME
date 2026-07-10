@@ -39,6 +39,34 @@ fn telex_simple_tone_and_cancel() {
 }
 
 #[test]
+fn utf8_key_result_matches_state_output() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let a = c("a");
+    let req = HC_KeyRequest {
+        kind: HCKeyKind::Printable as i32,
+        text: a.as_ptr(),
+        input_mode: InputMode::Telex as i32,
+        legacy_tone: 0,
+        spell_check: 1,
+        auto_restore: 1,
+        quick_consonants: 0,
+        english_protection: 0,
+        macro_in_english: 0,
+        esc_restore_raw: 0,
+    };
+
+    let result = hc_session_handle_key_utf8(session, &req);
+    assert_eq!(result.handled, 1);
+    assert_eq!(result.status_flag, HCStatusFlag::InProgress as i32);
+    let slice = unsafe {
+        std::slice::from_raw_parts(result.composition_string as *const u8, result.length)
+    };
+    assert_eq!(std::str::from_utf8(slice).unwrap(), "a");
+
+    hc_session_free(session);
+}
+
+#[test]
 fn telex_z_is_literal_unless_it_cancels_marks() {
     let session = hc_session_new(InputMode::Telex as i32, 0);
     let mut req = key_request(InputMode::Telex);

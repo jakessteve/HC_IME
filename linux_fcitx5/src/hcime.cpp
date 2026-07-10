@@ -14,6 +14,7 @@
 #include <fcitx/instance.h>
 #include <fcitx/menu.h>
 #include <fcitx/text.h>
+#include <fcitx-utils/capabilityflags.h>
 #include <fcitx/statusarea.h>
 #include <fcitx/userinterface.h>
 #include <fcitx/userinterfacemanager.h>
@@ -73,21 +74,10 @@ struct ContextState {
     SessionHandle session;
     bool hasActivePreedit = false;
     unsigned int lastCommitTrailingChars = 0;
+    bool surroundingTextEnabled = false;
     PerAppMode perAppMode = PerAppMode::Global;
     SmartSwitchState smartSwitchState = SmartSwitchState::Unknown;
     std::string previousSurroundingText;
-};
-
-struct StateHandle {
-    HC_State* state = nullptr;
-    explicit StateHandle(HC_State* value) : state(value) {}
-    ~StateHandle() {
-        if (state != nullptr) {
-            hc_state_free(state);
-        }
-    }
-    StateHandle(const StateHandle&) = delete;
-    StateHandle& operator=(const StateHandle&) = delete;
 };
 
 enum class HcImeInputMode {
@@ -231,69 +221,6 @@ static bool IsBoundaryChar(char ch) {
     }
 }
 
-static void AppendUtf8(std::string& result, uint32_t cp) {
-    if (cp <= 0x7F) {
-        result.push_back(static_cast<char>(cp));
-    } else if (cp <= 0x7FF) {
-        result.push_back(static_cast<char>(0xC0 | ((cp >> 6) & 0x1F)));
-        result.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else if (cp <= 0xFFFF) {
-        result.push_back(static_cast<char>(0xE0 | ((cp >> 12) & 0x0F)));
-        result.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-        result.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else {
-        result.push_back(static_cast<char>(0xF0 | ((cp >> 18) & 0x07)));
-        result.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
-        result.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-        result.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    }
-}
-
-static std::string StateToUtf8(const HC_State& state) {
-    if (state.composition_string == nullptr || state.length == 0) return {};
-    std::string result;
-    result.reserve(state.length * 3);
-    const auto* data = state.composition_string;
-    for (size_t i = 0; i < state.length; ++i) {
-        uint32_t cp = data[i];
-        if (cp >= 0xD800 && cp <= 0xDBFF) {
-            if (i + 1 < state.length) {
-                const uint32_t low = data[i + 1];
-                if (low >= 0xDC00 && low <= 0xDFFF) {
-                    cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
-                    ++i;
-                } else {
-                    cp = 0xFFFD;
-                }
-            } else {
-                cp = 0xFFFD;
-            }
-        } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
-            cp = 0xFFFD;
-        }
-        AppendUtf8(result, cp);
-    }
-    return result;
-}
-
-static std::string Utf16ToUtf8(const uint16_t* data, size_t length) {
-    if (!data || length == 0) return {};
-    std::string result;
-    result.reserve(length * 3);
-    for (size_t i = 0; i < length; ++i) {
-        uint32_t cp = data[i];
-        if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < length) {
-            uint32_t low = data[i + 1];
-            if (low >= 0xDC00 && low <= 0xDFFF) {
-                cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
-                ++i;
-            }
-        }
-        AppendUtf8(result, cp);
-    }
-    return result;
-}
-
 static void copyLegacyConfigValue(RawConfig& config, const char* oldPath, const char* newPath) {
     if (config.valueByPath(newPath) != nullptr) return;
     if (const auto* value = config.valueByPath(oldPath)) {
@@ -357,13 +284,55 @@ static bool isAppInList(const std::string& appName, const std::vector<std::strin
     return false;
 }
 
-static std::string computeSurroundingDiff(const std::string& oldText, const std::string& newText) {
-    size_t commonPrefix = 0;
-    size_t minLen = std::min(oldText.size(), newText.size());
-    while (commonPrefix < minLen && oldText[commonPrefix] == newText[commonPrefix]) {
-        ++commonPrefix;
+struct SurroundingTextDelta {
+    unsigned int deleteChars = 0;
+    std::string insertText;
+};
+
+struct Utf8KeyResult {
+    std::string text;
+    int32_t statusFlag = HC_STATUS_IN_PROGRESS;
+    int32_t errorCode = HC_ERROR_NONE;
+    int32_t spellCheckStatus = HC_SPELL_CHECK_VALID;
+    uint8_t handled = 0;
+};
+
+static SurroundingTextDelta computeSurroundingDiff(const std::string& oldText, const std::string& newText) {
+    if (!utf8::validate(oldText) || !utf8::validate(newText)) {
+        return {static_cast<unsigned int>(utf8::length(oldText)), newText};
     }
-    return newText.substr(commonPrefix);
+
+    size_t commonPrefixBytes = 0;
+    auto oldIt = oldText.begin();
+    auto newIt = newText.begin();
+    while (oldIt != oldText.end() && newIt != newText.end()) {
+        uint32_t oldChar = 0;
+        uint32_t newChar = 0;
+        auto oldNext = utf8::getNextChar(oldIt, oldText.end(), &oldChar);
+        auto newNext = utf8::getNextChar(newIt, newText.end(), &newChar);
+        if (oldChar != newChar) {
+            break;
+        }
+        commonPrefixBytes += static_cast<size_t>(std::distance(oldIt, oldNext));
+        oldIt = oldNext;
+        newIt = newNext;
+    }
+    auto commonPrefixChars = static_cast<unsigned int>(utf8::length(oldText, 0, commonPrefixBytes));
+    auto deleteChars = static_cast<unsigned int>(utf8::length(oldText) - commonPrefixChars);
+    return {deleteChars, newText.substr(commonPrefixBytes)};
+}
+
+static Utf8KeyResult handleKeyUtf8(void* session, const HC_KeyRequest* request) {
+    auto result = hc_session_handle_key_utf8(session, request);
+    Utf8KeyResult output;
+    output.statusFlag = result.status_flag;
+    output.errorCode = result.error_code;
+    output.spellCheckStatus = result.spell_check_status;
+    output.handled = result.handled;
+    if (result.length > 0 && result.composition_string != nullptr) {
+        output.text.assign(result.composition_string, result.length);
+    }
+    return output;
 }
 
 }  // namespace
@@ -431,17 +400,25 @@ public:
 
         if (event.isRelease()) return;
 
+        const bool useSurroundingText = shouldUseSurroundingText(event.inputContext(), state);
+
         if (isUndoKey(event.key()) && state.hasActivePreedit) {
             HC_KeyRequest undoRequest{makeKeyRequest(HC_KEY_UNDO, nullptr, mode)};
-            HC_KeyResult undoResult = hc_session_handle_key(state.session.ptr, &undoRequest);
-            StateHandle undoState{&undoResult.state};
-            const std::string undoOutput = StateToUtf8(undoResult.state);
+            const Utf8KeyResult undoResult = handleKeyUtf8(state.session.ptr, &undoRequest);
             if (undoResult.handled != 0) {
-                if (undoOutput.empty()) {
+                if (undoResult.text.empty()) {
+                    if (useSurroundingText) {
+                        commitViaSurroundingText(event.inputContext(), state, "");
+                        state.surroundingTextEnabled = false;
+                    }
                     state.hasActivePreedit = false;
                     clearPreedit(event.inputContext());
                 } else {
-                    setPreedit(event.inputContext(), undoOutput, *config_.behavior->displayUnderline, undoResult.state.spell_check_status);
+                    if (useSurroundingText) {
+                        applySurroundingTextPreedit(event.inputContext(), state, undoResult.text);
+                    } else {
+                        setPreedit(event.inputContext(), undoResult.text, *config_.behavior->displayUnderline, undoResult.spellCheckStatus);
+                    }
                 }
                 event.filterAndAccept();
             }
@@ -466,7 +443,7 @@ public:
         if (isBackspaceKey(event.key()) && (!state.hasActivePreedit || HasCommandModifier(event.key()))) {
             if (state.hasActivePreedit && HasCommandModifier(event.key())) {
                 commitAndForwardKey(event, state, mode);
-            } else if (tryReconvertLastCommitFromBackspace(event, state, mode)) {
+            } else if (tryReconvertLastCommitFromBackspace(event, state, mode, useSurroundingText)) {
                 return;
             } else {
                 resetAndForwardKey(event, state);
@@ -494,29 +471,32 @@ public:
             loadMacrosIntoSession(state.session.ptr, *config_.macroFilePath);
         }
 
-        HC_KeyResult result = hc_session_handle_key(state.session.ptr, &request);
-        StateHandle resultState{&result.state};
-        const std::string output = StateToUtf8(result.state);
+        const Utf8KeyResult result = handleKeyUtf8(state.session.ptr, &request);
+        const std::string& output = result.text;
 
         if (result.handled == 0) return;
 
-        if (result.state.error_code < 0) {
+        if (result.errorCode < 0) {
             event.filterAndAccept();
+            state.hasActivePreedit = false;
+            state.lastCommitTrailingChars = 0;
+            state.previousSurroundingText.clear();
+            state.surroundingTextEnabled = false;
             clearPreedit(event.inputContext());
             return;
         }
 
-        if (result.state.status_flag == HC_STATUS_ESC_RESTORED_RAW) {
+        if (result.statusFlag == HC_STATUS_ESC_RESTORED_RAW) {
             event.inputContext()->commitString(output);
             state.hasActivePreedit = false;
+            state.previousSurroundingText.clear();
+            state.surroundingTextEnabled = false;
             clearPreedit(event.inputContext());
             event.filterAndAccept();
             return;
         }
 
-        bool useSurroundingText = (*config_.output->outputMode == HcImeOutputMode::SurroundingText);
-
-        switch (result.state.status_flag) {
+        switch (result.statusFlag) {
             case HC_STATUS_IN_PROGRESS:
             case HC_STATUS_RECONVERSION_ACTIVE:
                 state.lastCommitTrailingChars = 0;
@@ -527,22 +507,23 @@ public:
                     if (useSurroundingText && state.hasActivePreedit) {
                         applySurroundingTextPreedit(event.inputContext(), state, output);
                     } else {
-                        setPreedit(event.inputContext(), output, *config_.behavior->displayUnderline, result.state.spell_check_status);
+                        setPreedit(event.inputContext(), output, *config_.behavior->displayUnderline, result.spellCheckStatus);
                     }
                 }
                 event.filterAndAccept();
                 return;
             case HC_STATUS_COMMIT:
             case HC_STATUS_ENGLISH_FALLBACK:
-                if (useSurroundingText && !state.previousSurroundingText.empty()) {
+                if (useSurroundingText) {
                     commitViaSurroundingText(event.inputContext(), state, output);
                 } else {
                     event.inputContext()->commitString(output);
                 }
-                updateSmartSwitch(state, appName, result.state.status_flag);
+                updateSmartSwitch(state, appName, result.statusFlag);
                 state.hasActivePreedit = false;
                 state.lastCommitTrailingChars = 0;
                 state.previousSurroundingText.clear();
+                state.surroundingTextEnabled = false;
                 clearPreedit(event.inputContext());
                 if (request.kind == HC_KEY_SPACE || request.kind == HC_KEY_BOUNDARY) {
                     state.lastCommitTrailingChars = output.empty() ? 0 : 1;
@@ -554,6 +535,10 @@ public:
                 return;
             default:
                 event.filterAndAccept();
+                state.hasActivePreedit = false;
+                state.lastCommitTrailingChars = 0;
+                state.previousSurroundingText.clear();
+                state.surroundingTextEnabled = false;
                 clearPreedit(event.inputContext());
                 return;
         }
@@ -570,10 +555,17 @@ public:
 
     void deactivate(const InputMethodEntry&, InputContextEvent& event) override {
         auto& state = stateFor(event.inputContext());
+        if (state.surroundingTextEnabled && !state.previousSurroundingText.empty()) {
+            auto surroundingLen = utf8::length(state.previousSurroundingText);
+            if (surroundingLen > 0) {
+                event.inputContext()->deleteSurroundingText(-static_cast<int>(surroundingLen), surroundingLen);
+            }
+        }
         if (state.session.ptr != nullptr) hc_session_reset(state.session.ptr);
         state.hasActivePreedit = false;
         state.lastCommitTrailingChars = 0;
         state.previousSurroundingText.clear();
+        state.surroundingTextEnabled = false;
         clearPreedit(event.inputContext());
         event.inputContext()->statusArea().clearGroup(StatusGroup::InputMethod);
         event.inputContext()->updateUserInterface(UserInterfaceComponent::StatusArea, true);
@@ -581,10 +573,17 @@ public:
 
     void reset(const InputMethodEntry&, InputContextEvent& event) override {
         auto& state = stateFor(event.inputContext());
+        if (state.surroundingTextEnabled && !state.previousSurroundingText.empty()) {
+            auto surroundingLen = utf8::length(state.previousSurroundingText);
+            if (surroundingLen > 0) {
+                event.inputContext()->deleteSurroundingText(-static_cast<int>(surroundingLen), surroundingLen);
+            }
+        }
         if (state.session.ptr != nullptr) hc_session_reset(state.session.ptr);
         state.hasActivePreedit = false;
         state.lastCommitTrailingChars = 0;
         state.previousSurroundingText.clear();
+        state.surroundingTextEnabled = false;
         clearPreedit(event.inputContext());
     }
 
@@ -631,14 +630,18 @@ private:
     }
 
     void applySurroundingTextPreedit(InputContext* ic, ContextState& state, const std::string& newPreedit) {
-        if (!state.previousSurroundingText.empty()) {
+        if (state.previousSurroundingText.empty()) {
+            ic->commitString(newPreedit);
+        } else {
             auto diff = computeSurroundingDiff(state.previousSurroundingText, newPreedit);
-            if (!diff.empty()) {
-                ic->commitString(diff);
+            if (diff.deleteChars > 0) {
+                ic->deleteSurroundingText(-static_cast<int>(diff.deleteChars), diff.deleteChars);
+            }
+            if (!diff.insertText.empty()) {
+                ic->commitString(diff.insertText);
             }
         }
         state.previousSurroundingText = newPreedit;
-        setPreedit(ic, newPreedit, *config_.behavior->displayUnderline, 0);
     }
 
     void commitViaSurroundingText(InputContext* ic, ContextState& state, const std::string& committedText) {
@@ -652,6 +655,18 @@ private:
         state.previousSurroundingText.clear();
     }
 
+    bool shouldUseSurroundingText(InputContext* ic, ContextState& state) {
+        if (*config_.output->outputMode != HcImeOutputMode::SurroundingText) {
+            return false;
+        }
+        if (!state.surroundingTextEnabled) {
+            const auto flags = ic->capabilityFlags();
+            state.surroundingTextEnabled =
+                flags.test(CapabilityFlag::SurroundingText) && ic->surroundingText().isValid();
+        }
+        return state.surroundingTextEnabled;
+    }
+
     ContextState& stateFor(InputContext* ic) { return contexts_[ic->uuid()]; }
 
     void resetAllSessions() {
@@ -660,46 +675,59 @@ private:
             state.hasActivePreedit = false;
             state.lastCommitTrailingChars = 0;
             state.previousSurroundingText.clear();
+            state.surroundingTextEnabled = false;
         }
     }
 
     void clearActivePreedit(KeyEvent& event, ContextState& state) {
+        if (state.surroundingTextEnabled && !state.previousSurroundingText.empty()) {
+            auto surroundingLen = utf8::length(state.previousSurroundingText);
+            if (surroundingLen > 0) {
+                event.inputContext()->deleteSurroundingText(-static_cast<int>(surroundingLen), surroundingLen);
+            }
+        }
         if (state.session.ptr != nullptr) hc_session_reset(state.session.ptr);
         state.hasActivePreedit = false;
         state.lastCommitTrailingChars = 0;
         state.previousSurroundingText.clear();
+        state.surroundingTextEnabled = false;
         clearPreedit(event.inputContext());
     }
 
     void commitActivePreedit(KeyEvent& event, ContextState& state, int32_t mode) {
         if (!state.hasActivePreedit || state.session.ptr == nullptr) return;
         HC_KeyRequest commitRequest{makeKeyRequest(HC_KEY_ENTER, nullptr, mode)};
-        HC_KeyResult commitResult = hc_session_handle_key(state.session.ptr, &commitRequest);
-        StateHandle commitState{&commitResult.state};
-        const std::string committedText = StateToUtf8(commitResult.state);
-        if (!committedText.empty()) event.inputContext()->commitString(committedText);
+        const Utf8KeyResult commitResult = handleKeyUtf8(state.session.ptr, &commitRequest);
+        if (state.surroundingTextEnabled) {
+            commitViaSurroundingText(event.inputContext(), state, commitResult.text);
+        } else if (!commitResult.text.empty()) {
+            event.inputContext()->commitString(commitResult.text);
+        }
         state.hasActivePreedit = false;
         state.lastCommitTrailingChars = 0;
         state.previousSurroundingText.clear();
+        state.surroundingTextEnabled = false;
         clearPreedit(event.inputContext());
     }
 
-    bool tryReconvertLastCommitFromBackspace(KeyEvent& event, ContextState& state, int32_t mode) {
+    bool tryReconvertLastCommitFromBackspace(KeyEvent& event, ContextState& state, int32_t mode, bool useSurroundingText) {
         if (state.session.ptr == nullptr || state.lastCommitTrailingChars == 0) return false;
         HC_KeyRequest request{makeKeyRequest(HC_KEY_BACKSPACE, nullptr, mode)};
-        HC_KeyResult result = hc_session_handle_key(state.session.ptr, &request);
-        StateHandle resultState{&result.state};
-        const std::string output = StateToUtf8(result.state);
-        if (result.handled == 0 || result.state.error_code < 0 ||
-            result.state.status_flag != HC_STATUS_RECONVERSION_ACTIVE || output.empty()) {
+        const Utf8KeyResult result = handleKeyUtf8(state.session.ptr, &request);
+        if (result.handled == 0 || result.errorCode < 0 ||
+            result.statusFlag != HC_STATUS_RECONVERSION_ACTIVE || result.text.empty()) {
             return false;
         }
-        const auto committedChars = static_cast<unsigned int>(utf8::length(output));
+        const auto committedChars = static_cast<unsigned int>(utf8::length(result.text));
         const auto deleteChars = committedChars + state.lastCommitTrailingChars;
         event.inputContext()->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
         state.lastCommitTrailingChars = 0;
         state.hasActivePreedit = true;
-        setPreedit(event.inputContext(), output, *config_.behavior->displayUnderline, result.state.spell_check_status);
+        if (useSurroundingText) {
+            applySurroundingTextPreedit(event.inputContext(), state, result.text);
+        } else {
+            setPreedit(event.inputContext(), result.text, *config_.behavior->displayUnderline, result.spellCheckStatus);
+        }
         event.filterAndAccept();
         return true;
     }

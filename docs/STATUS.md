@@ -25,9 +25,13 @@ cleanup and documentation sync.
   configuration tool for HC_IME.
 - External dictionary lookups reload when `HC_IME_VI_DICT` or `HC_IME_EN_DICT`
   changes, so config updates do not stay pinned to the first loaded file.
+- The addon can switch between preedit and surrounding-text output using the
+  native Fcitx5 capability checks, and the surrounding-text path now replaces
+  prior composition text with a UTF-8-safe diff instead of appending it.
 - The smoke script verifies Rust tests, addon build/install, metadata, shared
   library resolution, and FFI exports.
-- The latest validated e2e sweep passed after the dictionary-cache fix.
+- The latest validated e2e sweep passed after the dictionary-cache fix and the
+  surrounding-text bridge cleanup.
 
 ## Cherry-Picked Features (from VMK + VKey analysis)
 
@@ -70,7 +74,8 @@ cleanup and documentation sync.
 ### Non-Preedit Surrounding-Text Mode
 - Alternative output mode using Fcitx5 `deleteSurroundingText()` API
 - No root/daemon required (unlike VMK's uinput approach)
-- Tracks previous preedit text and computes diff for incremental updates
+- Tracks the previously inserted text and computes a UTF-8-aware delta for
+  incremental updates
 - Configurable via `OutputMode` setting (Preedit/SurroundingText)
 - Falls back to standard preedit when surrounding text is unavailable
 
@@ -83,6 +88,11 @@ The `HC_KeyRequest` struct now includes:
 - `esc_restore_raw: u8` — ESC returns raw keystrokes
 
 New status flag: `HC_STATUS_ESC_RESTORED_RAW = 4`
+
+New borrowed-output ABI:
+- `HC_Utf8KeyResult`
+- `hc_session_handle_key_utf8()` returns borrowed UTF-8 bytes valid until the
+  next key-result call on the same thread
 
 ## Remaining Gaps
 

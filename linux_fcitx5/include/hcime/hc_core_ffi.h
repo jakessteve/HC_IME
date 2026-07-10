@@ -52,6 +52,15 @@ typedef struct HC_KeyResult {
     uint8_t handled;
 } HC_KeyResult;
 
+typedef struct HC_Utf8KeyResult {
+    const char* composition_string;
+    size_t length;
+    int32_t status_flag;
+    int32_t error_code;
+    int32_t spell_check_status;
+    uint8_t handled;
+} HC_Utf8KeyResult;
+
 enum HC_StatusFlag {
     HC_STATUS_IN_PROGRESS = 0,
     HC_STATUS_COMMIT = 1,
@@ -122,6 +131,7 @@ void hc_session_reset(void* session);
 void hc_session_add_macro(void* session, const char* key, const char* value);
 void hc_session_clear_macros(void* session);
 HC_KeyResult hc_session_handle_key(void* session, const HC_KeyRequest* request);
+HC_Utf8KeyResult hc_session_handle_key_utf8(void* session, const HC_KeyRequest* request);
 
 #ifdef __cplusplus
 }

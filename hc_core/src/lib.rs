@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::ffi::{c_char, CStr};
 use std::ptr;
 
@@ -20,6 +21,10 @@ use session::{render_raw_input, vni_digit_transforms_buffer, Session};
 use transform::{apply_circumflex, apply_telex_w, apply_tone_to_word};
 
 use vowel::strip_all_marks;
+
+thread_local! {
+    static UTF8_RESULT_BUFFER: RefCell<String> = const { RefCell::new(String::new()) };
+}
 
 impl Session {
     fn handle_key(&mut self, request: &HC_KeyRequest) -> HC_KeyResult {
@@ -384,6 +389,34 @@ pub extern "C" fn hc_session_handle_key(
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn hc_session_handle_key_utf8(
+    session: *mut std::ffi::c_void,
+    request: *const HC_KeyRequest,
+) -> HC_Utf8KeyResult {
+    let result = hc_session_handle_key(session, request);
+    let mut utf8_result = HC_Utf8KeyResult {
+        composition_string: ptr::null(),
+        length: 0,
+        status_flag: result.state.status_flag,
+        error_code: result.state.error_code,
+        spell_check_status: result.state.spell_check_status,
+        handled: result.handled,
+    };
+
+    UTF8_RESULT_BUFFER.with(|buffer| {
+        let mut buffer = buffer.borrow_mut();
+        state_to_utf8_into(&result.state, &mut buffer);
+        utf8_result.composition_string = buffer.as_ptr() as *const c_char;
+        utf8_result.length = buffer.len();
+    });
+
+    let mut state = result.state;
+    hc_state_free(&mut state);
+    utf8_result
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn hc_compose_with_request(request: *const HC_ComposeRequest) -> HC_State {
     if request.is_null() {
         return hc_error_state(HCErrorCode::NullPointer);
@@ -564,6 +597,36 @@ pub fn hc_state_from_string(text: &str, status: HCStatusFlag, error: HCErrorCode
         status_flag: status as i32,
         error_code: error as i32,
         spell_check_status: HCSpellCheckStatus::Valid as i32,
+    }
+}
+
+fn state_to_utf8_into(state: &HC_State, out: &mut String) {
+    out.clear();
+    if state.composition_string.is_null() || state.length == 0 {
+        return;
+    }
+    out.reserve(state.length * 3);
+    let data = unsafe { std::slice::from_raw_parts(state.composition_string, state.length) };
+    let mut i = 0;
+    while i < data.len() {
+        let mut cp = data[i] as u32;
+        if (0xD800..=0xDBFF).contains(&cp) {
+            if i + 1 < data.len() {
+                let low = data[i + 1] as u32;
+                if (0xDC00..=0xDFFF).contains(&low) {
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                    i += 1;
+                } else {
+                    cp = 0xFFFD;
+                }
+            } else {
+                cp = 0xFFFD;
+            }
+        } else if (0xDC00..=0xDFFF).contains(&cp) {
+            cp = 0xFFFD;
+        }
+        out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+        i += 1;
     }
 }
 

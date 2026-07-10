@@ -11,6 +11,7 @@
 #include <fcitx/inputcontext.h>
 #include <fcitx/inputcontextmanager.h>
 #include <fcitx/inputmethodentry.h>
+#include <fcitx-utils/capabilityflags.h>
 
 #include <cstdlib>
 #include <iostream>
@@ -216,6 +217,54 @@ int main() {
         require(send(engine, entry, ic, FcitxKey_a), "VIQR action a accepted");
         require(send(engine, entry, ic, FcitxKey_apostrophe), "VIQR action boundary accepted");
         require(ic.inputPanel().clientPreedit().toString() == "á", "VIQR action composes boundary triggers");
+    }
+
+    {
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        ic.setCapabilityFlags(CapabilityFlags(CapabilityFlag::SurroundingText));
+        ic.surroundingText().setText("hello", 5, 5);
+        ic.updateSurroundingText();
+
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        InputContextEvent activateEvent(&ic, EventType::InputContextInputMethodActivated);
+        engine.activate(entry, activateEvent);
+        RawConfig config;
+        config.setValueByPath("Output/OutputMode", "SurroundingText");
+        engine.setConfig(config);
+
+        require(send(engine, entry, ic, FcitxKey_a), "surrounding-text a accepted");
+        require(ic.commits.size() == 1 && ic.commits.back() == "a", "surrounding-text inserts first composition into surrounding text");
+        require(ic.surroundingDeletes.empty(), "surrounding-text first key does not delete existing content");
+        require(ic.inputPanel().clientPreedit().toString().empty(), "surrounding-text mode keeps the client preedit empty");
+
+        require(send(engine, entry, ic, FcitxKey_s), "surrounding-text tone accepted");
+        require(ic.commits.size() == 2 && ic.commits.back() == "á", "surrounding-text updates the committed composition");
+        require(ic.surroundingDeletes.size() == 1, "surrounding-text second key replaces previous text");
+        require(ic.surroundingDeletes.back().first == -1 && ic.surroundingDeletes.back().second == 1,
+                "surrounding-text second key deletes the previous single character");
+        require(ic.inputPanel().clientPreedit().toString().empty(), "surrounding-text mode still avoids client preedit");
+    }
+
+    {
+        InputContextManager manager;
+        MockInputContext ic(manager);
+
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        InputContextEvent activateEvent(&ic, EventType::InputContextInputMethodActivated);
+        engine.activate(entry, activateEvent);
+        RawConfig config;
+        config.setValueByPath("Output/OutputMode", "SurroundingText");
+        engine.setConfig(config);
+
+        require(send(engine, entry, ic, FcitxKey_a), "surrounding-text fallback a accepted");
+        require(ic.inputPanel().clientPreedit().toString() == "a", "surrounding-text fallback uses preedit when capability is missing");
+        require(ic.commits.empty(), "surrounding-text fallback does not commit text");
+        require(ic.surroundingDeletes.empty(), "surrounding-text fallback does not delete surrounding text");
     }
 
     {
