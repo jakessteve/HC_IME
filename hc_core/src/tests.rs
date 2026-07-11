@@ -350,13 +350,14 @@ fn telex_tone_placement_on_ye_clusters() {
     let session = hc_session_new(InputMode::Telex as i32, 0);
     let mut req = key_request(InputMode::Telex);
 
-    assert_eq!(type_raw(session, &mut req, "yees"), "yế");
+    // "yê" auto-completes to "yêu" in Vietnamese orthography
+    assert_eq!(type_raw(session, &mut req, "yees"), "yếu");
     hc_session_reset(session);
 
-    assert_eq!(type_raw(session, &mut req, "yeef"), "yề");
+    assert_eq!(type_raw(session, &mut req, "yeef"), "yều");
     hc_session_reset(session);
 
-    assert_eq!(type_raw(session, &mut req, "nyeer"), "nyể");
+    assert_eq!(type_raw(session, &mut req, "nyeer"), "nyểu");
     hc_session_reset(session);
 
     assert_eq!(type_raw(session, &mut req, "mex"), "mẽ");
@@ -1335,5 +1336,270 @@ fn esc_without_restore_flag_resets_normally() {
     let result = hc_session_handle_key(session, &req);
     assert_eq!(read_and_free(result.state), "");
 
+    hc_session_free(session);
+}
+
+#[test]
+fn tone_placement_on_uo_ue_uy_clusters() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+
+    // "thuần" - tone on â (circumflex a), not u
+    // Input: th-u-a-a-n-f (double-tap 'a' for circumflex, then tone)
+    assert_eq!(type_raw(session, &mut req, "thuaanf"), "thuần");
+    hc_session_reset(session);
+
+    // "túy" - tone on u (first vowel in uy cluster), not y
+    assert_eq!(type_raw(session, &mut req, "tuys"), "túy");
+    hc_session_reset(session);
+
+    // "thùy" - tone on u in "uy" cluster
+    assert_eq!(type_raw(session, &mut req, "thuyf"), "thùy");
+    hc_session_reset(session);
+
+    // "huỳnh" - tone on u in "uy" cluster with coda
+    assert_eq!(type_raw(session, &mut req, "huynhf"), "huỳnh");
+    hc_session_reset(session);
+
+    // "tủy" - tone on u in "uy" with coda
+    assert_eq!(type_raw(session, &mut req, "tuyr"), "tủy");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn investigate_edge_cases_batch1() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+
+    // Group 1: "uơ" cluster (no explicit rule, relies on default=last)
+    let r = type_raw(session, &mut req, "thuows");
+    eprintln!("thuows → {}", r);
+    let chars: Vec<char> = r.chars().collect();
+    for (i, ch) in chars.iter().enumerate() {
+        eprintln!("  [{}] {:?} U+{:04X}", i, ch, *ch as u32);
+    }
+    hc_session_reset(session);
+
+    // Group 2: "ia" cluster
+    let r = type_raw(session, &mut req, "tias");
+    eprintln!("tias → {}", r);
+    let chars: Vec<char> = r.chars().collect();
+    for (i, ch) in chars.iter().enumerate() {
+        eprintln!("  [{}] {:?} U+{:04X}", i, ch, *ch as u32);
+    }
+    hc_session_reset(session);
+
+    // Group 3: "ia" with 3 vowels (i+a)
+    let r = type_raw(session, &mut req, "diaf");
+    eprintln!("diaf → {}", r);
+    let chars: Vec<char> = r.chars().collect();
+    for (i, ch) in chars.iter().enumerate() {
+        eprintln!("  [{}] {:?} U+{:04X}", i, ch, *ch as u32);
+    }
+    hc_session_reset(session);
+
+    // Group 4: "uơ" with tone 3 (hỏi)
+    let r = type_raw(session, &mut req, "thuowr");
+    eprintln!("thuowr → {}", r);
+    let chars: Vec<char> = r.chars().collect();
+    for (i, ch) in chars.iter().enumerate() {
+        eprintln!("  [{}] {:?} U+{:04X}", i, ch, *ch as u32);
+    }
+    hc_session_reset(session);
+
+    // Group 5: "y+u" without circumflex (rare)
+    let r = type_raw(session, &mut req, "hyus");
+    eprintln!("hyus → {}", r);
+    let chars: Vec<char> = r.chars().collect();
+    for (i, ch) in chars.iter().enumerate() {
+        eprintln!("  [{}] {:?} U+{:04X}", i, ch, *ch as u32);
+    }
+    hc_session_reset(session);
+
+    // Group 6: "i+u" without circumflex
+    let r = type_raw(session, &mut req, "bius");
+    eprintln!("bius → {}", r);
+    let chars: Vec<char> = r.chars().collect();
+    for (i, ch) in chars.iter().enumerate() {
+        eprintln!("  [{}] {:?} U+{:04X}", i, ch, *ch as u32);
+    }
+    hc_session_reset(session);
+
+    // Group 7: Multiple diacritics - "ưô" (horn+circumflex)
+    let r = type_raw(session, &mut req, "duongwfs");
+    eprintln!("duongwfs → {}", r);
+    let chars: Vec<char> = r.chars().collect();
+    for (i, ch) in chars.iter().enumerate() {
+        eprintln!("  [{}] {:?} U+{:04X}", i, ch, *ch as u32);
+    }
+    hc_session_reset(session);
+
+    // Group 8: "oai" with all tones
+    let r = type_raw(session, &mut req, "hoaif");
+    eprintln!("hoaif → {}", r);
+    let chars: Vec<char> = r.chars().collect();
+    for (i, ch) in chars.iter().enumerate() {
+        eprintln!("  [{}] {:?} U+{:04X}", i, ch, *ch as u32);
+    }
+    hc_session_reset(session);
+
+    hc_session_free(session);
+}
+
+#[test]
+fn investigate_edge_cases_batch2() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+
+    // "ưoi" - horn priority
+    let r = type_raw(session, &mut req, "muowis");
+    eprintln!("muowis → {}", r);
+    let chars: Vec<char> = r.chars().collect();
+    for (i, ch) in chars.iter().enumerate() {
+        eprintln!("  [{}] {:?} U+{:04X}", i, ch, *ch as u32);
+    }
+    hc_session_reset(session);
+
+    // "ưi" - horn priority
+    let r = type_raw(session, &mut req, "guwis");
+    eprintln!("guwis → {}", r);
+    let chars: Vec<char> = r.chars().collect();
+    for (i, ch) in chars.iter().enumerate() {
+        eprintln!("  [{}] {:?} U+{:04X}", i, ch, *ch as u32);
+    }
+    hc_session_reset(session);
+
+    // "ươi" - horn priority
+    let r = type_raw(session, &mut req, "muowis");
+    eprintln!("muowis → {}", r);
+    hc_session_reset(session);
+
+    // "uôi" - cluster uoi → last
+    let r = type_raw(session, &mut req, "cuois");
+    eprintln!("cuois → {}", r);
+    let chars: Vec<char> = r.chars().collect();
+    for (i, ch) in chars.iter().enumerate() {
+        eprintln!("  [{}] {:?} U+{:04X}", i, ch, *ch as u32);
+    }
+    hc_session_reset(session);
+
+    // "ye" without circumflex + coda
+    let r = type_raw(session, &mut req, "byens");
+    eprintln!("byens → {}", r);
+    let chars: Vec<char> = r.chars().collect();
+    for (i, ch) in chars.iter().enumerate() {
+        eprintln!("  [{}] {:?} U+{:04X}", i, ch, *ch as u32);
+    }
+    hc_session_reset(session);
+
+    // "ie" without circumflex + coda
+    let r = type_raw(session, &mut req, "biens");
+    eprintln!("biens → {}", r);
+    let chars: Vec<char> = r.chars().collect();
+    for (i, ch) in chars.iter().enumerate() {
+        eprintln!("  [{}] {:?} U+{:04X}", i, ch, *ch as u32);
+    }
+    hc_session_reset(session);
+
+    // "ie" without circumflex, no coda
+    let r = type_raw(session, &mut req, "bies");
+    eprintln!("bies → {}", r);
+    let chars: Vec<char> = r.chars().collect();
+    for (i, ch) in chars.iter().enumerate() {
+        eprintln!("  [{}] {:?} U+{:04X}", i, ch, *ch as u32);
+    }
+    hc_session_reset(session);
+
+    // "uơ" standalone
+    let r = type_raw(session, &mut req, "quowes");
+    eprintln!("quowes → {}", r);
+    let chars: Vec<char> = r.chars().collect();
+    for (i, ch) in chars.iter().enumerate() {
+        eprintln!("  [{}] {:?} U+{:04X}", i, ch, *ch as u32);
+    }
+    hc_session_reset(session);
+
+    hc_session_free(session);
+}
+
+#[test]
+fn tone_edge_case_uoi_circumflex() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    let result = type_raw(session, &mut req, "toois");
+    assert_eq!(result, "tối", "tối: tone should go on ô (circumflex o)");
+    hc_session_free(session);
+}
+
+#[test]
+fn tone_edge_case_uoi_with_coda() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    let result = type_raw(session, &mut req, "toongsf");
+    assert_eq!(result, "tống", "tống: tone should go on ô with coda");
+    hc_session_free(session);
+}
+
+#[test]
+fn tone_edge_case_uoi_horn() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    let result = type_raw(session, &mut req, "tuwois");
+    assert_eq!(result, "tưới", "tưới: tone should go on ơ (horn o)");
+    hc_session_free(session);
+}
+
+#[test]
+fn tone_edge_case_yeu_circumflex() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    let result = type_raw(session, &mut req, "yeef");
+    assert_eq!(result, "yều", "yều: tone should go on ê (circumflex e)");
+    hc_session_free(session);
+}
+
+#[test]
+fn tone_edge_case_ieu_circumflex() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    let result = type_raw(session, &mut req, "ieef");
+    assert_eq!(result, "iều", "iều: tone should go on ê (circumflex e)");
+    hc_session_free(session);
+}
+
+#[test]
+fn tone_edge_case_oai() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    let result = type_raw(session, &mut req, "oair");
+    assert_eq!(result, "oải", "oải: tone should go on a (second vowel)");
+    hc_session_free(session);
+}
+
+#[test]
+fn tone_edge_case_uay() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    let result = type_raw(session, &mut req, "uayr");
+    assert_eq!(result, "uẩy", "uẩy: tone should go on a (second vowel)");
+    hc_session_free(session);
+}
+
+#[test]
+fn tone_edge_case_uy_with_coda() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    let result = type_raw(session, &mut req, "uyeenr");
+    assert_eq!(result, "uyển", "uyển: tone should go on y with coda");
+    hc_session_free(session);
+}
+
+#[test]
+fn tone_edge_case_uy_no_coda() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    let result = type_raw(session, &mut req, "uys");
+    assert_eq!(result, "úy", "úy: tone should go on u without coda");
     hc_session_free(session);
 }

@@ -207,6 +207,24 @@ pub fn apply_d_stroke(buffer: &mut String) -> bool {
 
 pub fn apply_tone(buffer: &mut String, tone: Tone, legacy_tone: bool) -> bool {
     let mut chars: Vec<char> = buffer.chars().collect();
+
+    apply_vietnamese_normalization(&mut chars);
+
+    let has_tone = chars
+        .iter()
+        .any(|&ch| vowel_signature(ch).is_some_and(|(_, _, t)| t != Tone::Flat));
+
+    let ends_with_coda = chars.len() >= 2 && {
+        let last = chars[chars.len() - 1];
+        let second_last = chars[chars.len() - 2];
+        !is_vowel(last) && !is_vowel(second_last)
+    };
+
+    if has_tone && ends_with_coda {
+        *buffer = chars.into_iter().collect();
+        return true;
+    }
+
     let target = match tone_target_index(&chars, legacy_tone) {
         Some(idx) => idx,
         None => return false,
@@ -219,6 +237,57 @@ pub fn apply_tone(buffer: &mut String, tone: Tone, legacy_tone: bool) -> bool {
     chars[target] = next;
     *buffer = chars.into_iter().collect();
     true
+}
+
+fn apply_vietnamese_normalization(chars: &mut Vec<char>) {
+    let bases: String = chars.iter().map(|&ch| base_char(ch)).collect();
+
+    if bases.contains("uay") {
+        for idx in 0..chars.len() {
+            if let Some((VowelFamily::PlainA, uppercase, tone)) = vowel_signature(chars[idx]) {
+                if idx > 0 && idx < chars.len() - 1 {
+                    let prev_base = base_char(chars[idx - 1]);
+                    let next_base = base_char(chars[idx + 1]);
+                    if prev_base == 'u' && next_base == 'y' {
+                        chars[idx] = compose_vowel(VowelFamily::CircumflexA, uppercase, tone);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let len = chars.len();
+    if len >= 2 {
+        let last = chars[len - 1];
+        let second_last = chars[len - 2];
+        let last_is_circumflex_e =
+            vowel_signature(last).is_some_and(|(f, _, _)| matches!(f, VowelFamily::CircumflexE));
+        let second_last_base = base_char(second_last);
+
+        if last_is_circumflex_e && matches!(second_last_base, 'y' | 'i') {
+            let preceding_base = if len >= 3 {
+                base_char(chars[len - 3])
+            } else {
+                ' '
+            };
+            if preceding_base != 'u' {
+                chars.push('u');
+            }
+        }
+    }
+
+    for i in 0..chars.len().saturating_sub(1) {
+        if let Some((VowelFamily::HornU, _, _)) = vowel_signature(chars[i]) {
+            if i + 1 < chars.len() {
+                if let Some((VowelFamily::PlainO, uppercase, tone)) = vowel_signature(chars[i + 1])
+                {
+                    chars[i + 1] = compose_vowel(VowelFamily::HornO, uppercase, tone);
+                    break;
+                }
+            }
+        }
+    }
 }
 
 fn tone_target_index(chars: &[char], legacy_tone: bool) -> Option<usize> {
@@ -256,21 +325,9 @@ fn tone_target_index(chars: &[char], legacy_tone: bool) -> Option<usize> {
         vowels.remove(0);
     }
 
-    let bases: String = vowels.iter().map(|&idx| base_char(chars[idx])).collect();
-    let cluster = bases.as_str();
-
-    match cluster {
-        "eu" => return vowels.first().copied(),
-        "ieu" | "yeu" => return vowels.get(1).copied().or_else(|| vowels.last().copied()),
-        "ai" | "ao" | "au" | "ay" | "eo" | "ia" | "iu" | "oi" | "ua" | "ui" => {
-            return vowels.first().copied();
-        }
-        "oa" | "oe" | "uy" => return vowels.last().copied(),
-        "uo" | "uye" => return vowels.last().copied(),
-        "oai" | "uai" | "uay" => return vowels.get(1).copied().or_else(|| vowels.last().copied()),
-        _ => {}
-    }
-
+    // Diacritic priority: if any vowel carries a non-plain mark (circumflex,
+    // breve, horn), the tone belongs on that vowel. This must be checked
+    // before cluster matching so that "uâ" (thuần) tones the â, not the u.
     for preferred in [
         VowelFamily::HornO,
         VowelFamily::CircumflexE,
@@ -284,6 +341,31 @@ fn tone_target_index(chars: &[char], legacy_tone: bool) -> Option<usize> {
         }) {
             return Some(idx);
         }
+    }
+
+    let bases: String = vowels.iter().map(|&idx| base_char(chars[idx])).collect();
+    let cluster = bases.as_str();
+
+    match cluster {
+        "eu" => return vowels.first().copied(),
+        "ieu" | "yeu" => return vowels.get(1).copied().or_else(|| vowels.last().copied()),
+        "ai" | "ao" | "au" | "ay" | "eo" | "ia" | "iu" | "oi" | "ua" | "ui" => {
+            return vowels.first().copied();
+        }
+        "oa" | "oe" => return vowels.last().copied(),
+        "uy" => {
+            // For "uy" cluster: tone on u when no coda, tone on y when there's a coda
+            let last_vowel_idx = *vowels.last().unwrap();
+            let has_coda = last_vowel_idx < chars.len() - 1;
+            if has_coda {
+                return vowels.last().copied();
+            } else {
+                return vowels.first().copied();
+            }
+        }
+        "uo" | "uye" => return vowels.last().copied(),
+        "oai" | "uai" | "uay" => return vowels.get(1).copied().or_else(|| vowels.last().copied()),
+        _ => {}
     }
 
     match cluster {
