@@ -1603,3 +1603,84 @@ fn tone_edge_case_uy_no_coda() {
     assert_eq!(result, "úy", "úy: tone should go on u without coda");
     hc_session_free(session);
 }
+
+#[test]
+fn vni_edge_case_uoi_circumflex() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+    let result = type_raw(session, &mut req, "to6i1");
+    assert_eq!(result, "tối", "tối: tone should go on ô (circumflex o)");
+    hc_session_free(session);
+}
+
+#[test]
+fn vni_edge_case_uoi_with_coda() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+    let result = type_raw(session, &mut req, "to6ng2");
+    assert_eq!(result, "tồng", "tồng: tone should go on ô with coda");
+    hc_session_free(session);
+}
+
+#[test]
+fn vni_edge_case_uoi_horn() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+    let result = type_raw(session, &mut req, "tu7o7i1");
+    assert_eq!(result, "tưới", "tưới: tone should go on ơ (horn o)");
+    hc_session_free(session);
+}
+
+#[test]
+fn vni_edge_case_yeu_circumflex() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+    let result = type_raw(session, &mut req, "ye6u2");
+    assert_eq!(result, "yều", "yều: tone should go on ê (circumflex e)");
+    hc_session_free(session);
+}
+
+#[test]
+fn vni_edge_case_ieu_circumflex() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+    let result = type_raw(session, &mut req, "ie6u2");
+    assert_eq!(result, "iều", "iều: tone should go on ê (circumflex e)");
+    hc_session_free(session);
+}
+
+#[test]
+fn vni_edge_case_oai() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+    let result = type_raw(session, &mut req, "oai3");
+    assert_eq!(result, "oải", "oải: tone should go on a (second vowel)");
+    hc_session_free(session);
+}
+
+#[test]
+fn vni_edge_case_uay() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+    let result = type_raw(session, &mut req, "uay3");
+    assert_eq!(result, "uẩy", "uẩy: tone should go on a (second vowel)");
+    hc_session_free(session);
+}
+
+#[test]
+fn vni_edge_case_uy_with_coda() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+    let result = type_raw(session, &mut req, "uye6n3");
+    assert_eq!(result, "uyển", "uyển: tone should go on y with coda");
+    hc_session_free(session);
+}
+
+#[test]
+fn vni_edge_case_uy_no_coda() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+    let result = type_raw(session, &mut req, "uy1");
+    assert_eq!(result, "úy", "úy: tone should go on u without coda");
+    hc_session_free(session);
+}
