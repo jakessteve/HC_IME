@@ -373,11 +373,6 @@ fn apply_vni_trigger(buffer: &mut String, ch: char, legacy_tone: bool) -> bool {
         '7' => apply_horn(buffer),
         '8' => apply_breve(buffer),
         '9' => apply_d_stroke(buffer),
-        's' | 'S' => apply_tone(buffer, Tone::Sac, legacy_tone),
-        'f' | 'F' => apply_tone(buffer, Tone::Huyen, legacy_tone),
-        'r' | 'R' => apply_tone(buffer, Tone::Hoi, legacy_tone),
-        'x' | 'X' => apply_tone(buffer, Tone::Nga, legacy_tone),
-        'j' | 'J' => apply_tone(buffer, Tone::Nang, legacy_tone),
         _ => false,
     }
 }

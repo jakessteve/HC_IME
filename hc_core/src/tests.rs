@@ -1742,7 +1742,7 @@ fn telex_tuan_double_a_tone() {
 fn vni_tuan_double_a_tone() {
     let session = hc_session_new(InputMode::Vni as i32, 0);
     let mut req = key_request(InputMode::Vni);
-    let result = type_raw(session, &mut req, "tua6nf");
+    let result = type_raw(session, &mut req, "tua6n2");
     assert_eq!(result, "tuần", "tuần: VNI 6 should create â, tone on â");
     hc_session_free(session);
 }
