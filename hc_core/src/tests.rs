@@ -796,14 +796,18 @@ fn tone_after_gi_glide_goes_to_main_vowel() {
 }
 
 #[test]
-fn legacy_tone_keeps_first_vowel_for_qu_and_gi() {
+fn legacy_tone_respects_qu_and_gi_glides() {
     let session = hc_session_new(InputMode::Telex as i32, 1);
     let mut req = key_request(InputMode::Telex);
     req.legacy_tone = 1;
 
-    assert_eq!(type_raw(session, &mut req, "quas"), "qúa");
+    let r1 = type_raw(session, &mut req, "quas");
+    println!("quas -> {}", r1);
+    assert_eq!(r1, "quá");
     hc_session_reset(session);
-    assert_eq!(type_raw(session, &mut req, "gias"), "gía");
+    let r2 = type_raw(session, &mut req, "gias");
+    println!("gias -> {}", r2);
+    assert_eq!(r2, "giá");
 
     hc_session_free(session);
 
@@ -811,9 +815,9 @@ fn legacy_tone_keeps_first_vowel_for_qu_and_gi() {
     let mut req = key_request(InputMode::Vni);
     req.legacy_tone = 1;
 
-    assert_eq!(type_raw(session, &mut req, "qua1"), "qúa");
+    assert_eq!(type_raw(session, &mut req, "qua1"), "quá");
     hc_session_reset(session);
-    assert_eq!(type_raw(session, &mut req, "gia1"), "gía");
+    assert_eq!(type_raw(session, &mut req, "gia1"), "giá");
 
     hc_session_free(session);
 }
@@ -1682,5 +1686,171 @@ fn vni_edge_case_uy_no_coda() {
     let mut req = key_request(InputMode::Vni);
     let result = type_raw(session, &mut req, "uy1");
     assert_eq!(result, "úy", "úy: tone should go on u without coda");
+    hc_session_free(session);
+}
+
+#[test]
+fn telex_tuan_circumflex_tone() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    let result = type_raw(session, &mut req, "tuanf");
+    assert_eq!(
+        result, "tuần",
+        "tuần: tone should go on â (circumflex a), not u"
+    );
+    hc_session_free(session);
+}
+
+#[test]
+fn legacy_tone_tuan_circumflex() {
+    let session = hc_session_new(InputMode::Telex as i32, 1);
+    let mut req = key_request(InputMode::Telex);
+    req.legacy_tone = 1;
+    let result = type_raw(session, &mut req, "tuanf");
+    assert_eq!(
+        result, "tuần",
+        "legacy_tone: tuanf should produce 'tuần' (tone on â), not 'tùân'"
+    );
+    hc_session_free(session);
+}
+
+#[test]
+fn vni_tuan_circumflex_tone() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+    let result = type_raw(session, &mut req, "tua6n2");
+    assert_eq!(
+        result, "tuần",
+        "tuần: tone should go on â (circumflex a), not u"
+    );
+    hc_session_free(session);
+}
+
+#[test]
+fn telex_tuan_double_a_tone() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    let result = type_raw(session, &mut req, "tuaanf");
+    assert_eq!(
+        result, "tuần",
+        "tuần: double-tap 'a' should create â, tone on â"
+    );
+    hc_session_free(session);
+}
+
+#[test]
+fn vni_tuan_double_a_tone() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+    let result = type_raw(session, &mut req, "tua6nf");
+    assert_eq!(result, "tuần", "tuần: VNI 6 should create â, tone on â");
+    hc_session_free(session);
+}
+
+#[test]
+fn telex_tuan_w_circumflex() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    // Try using 'w' to create circumflex on 'a'
+    let result = type_raw(session, &mut req, "tuanwf");
+    println!("tuanwf -> {}", result);
+    // If this produces "tùan" instead of "tuần", we have a bug
+    hc_session_free(session);
+}
+
+#[test]
+fn telex_tuan_step_by_step() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+
+    // Type "tuan"
+    let result1 = type_raw(session, &mut req, "tuan");
+    println!("tuan -> {}", result1);
+
+    // Now add second 'a' for circumflex
+    let result2 = type_raw(session, &mut req, "a");
+    println!("tuana -> {}", result2);
+
+    // Now add tone
+    let result3 = type_raw(session, &mut req, "f");
+    println!("tuanaf -> {}", result3);
+
+    assert_eq!(result3, "tuần", "Step-by-step should produce 'tuần'");
+    hc_session_free(session);
+}
+
+#[test]
+fn vni_tuan_circumflex_after_consonant() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+
+    // Type "tuan" then '6' for circumflex
+    let result1 = type_raw(session, &mut req, "tuan");
+    println!("tuan -> {}", result1);
+
+    let result2 = type_raw(session, &mut req, "6");
+    println!("tuan6 -> {}", result2);
+
+    let result3 = type_raw(session, &mut req, "2");
+    println!("tuan62 -> {}", result3);
+
+    assert_eq!(result3, "tuần", "VNI: tuan + 6 + 2 should produce 'tuần'");
+    hc_session_free(session);
+}
+
+#[test]
+fn telex_tuan_tone_then_circumflex() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+
+    // What if user types tone first, then tries to add circumflex?
+    let result1 = type_raw(session, &mut req, "tuanf");
+    println!("tuanf -> {}", result1);
+
+    // Now try to add circumflex somehow (this shouldn't work in Telex, but let's see)
+    // Actually, in Telex there's no way to add circumflex after the fact
+
+    hc_session_free(session);
+}
+
+#[test]
+fn test_tone_on_tuan_with_circumflex() {
+    // Directly test tone placement on "tuân" (with circumflex)
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+
+    // Build "tuân" using VNI
+    let result1 = type_raw(session, &mut req, "tuan6");
+    println!("tuan6 -> {}", result1);
+    assert_eq!(result1, "tuân");
+
+    // Now apply tone 2 (huyền)
+    let result2 = type_raw(session, &mut req, "2");
+    println!("tuân + 2 -> {}", result2);
+    assert_eq!(result2, "tuần", "Tone should go on â, not u");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn test_tone_then_circumflex_vni() {
+    // Test: apply tone first, then circumflex
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+
+    // Build "tuan" then apply tone
+    let result1 = type_raw(session, &mut req, "tuan2");
+    println!("tuan2 -> {}", result1);
+
+    // Now apply circumflex
+    let result2 = type_raw(session, &mut req, "6");
+    println!("tuan2 + 6 -> {}", result2);
+
+    // The tone should move to the circumflex vowel
+    assert_eq!(
+        result2, "tuần",
+        "After adding circumflex, tone should move to â"
+    );
+
     hc_session_free(session);
 }

@@ -8,14 +8,37 @@ where
     F: Fn(char) -> bool,
 {
     let mut chars: Vec<char> = buffer.chars().collect();
+    let target_lower = ch.to_ascii_lowercase();
 
-    if let Some(&last_char) = chars.last() {
+    let last_char_matches = if let Some(&last_char) = chars.last() {
         let last_base = base_char(last_char);
-        if !predicate(last_base) || last_base != ch.to_ascii_lowercase() {
+        predicate(last_base) && last_base == target_lower
+    } else {
+        false
+    };
+
+    if !last_char_matches {
+        let has_ua_context = chars
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(idx, &c)| {
+                vowel_signature(c).and_then(|(_, _, _)| {
+                    let base = base_char(c);
+                    if predicate(base) && base == target_lower && idx > 0 {
+                        let prev_base = base_char(chars[idx - 1]);
+                        if prev_base == 'u' {
+                            return Some(true);
+                        }
+                    }
+                    None
+                })
+            })
+            .is_some();
+
+        if !has_ua_context {
             return false;
         }
-    } else {
-        return false;
     }
 
     if let Some((idx, replacement)) = chars.iter().enumerate().rev().find_map(|(idx, prev)| {
@@ -127,16 +150,62 @@ where
     F: Fn(VowelFamily) -> Option<VowelFamily>,
 {
     let mut chars: Vec<char> = buffer.chars().collect();
+
+    let existing_tone = chars.iter().find_map(|&ch| {
+        vowel_signature(ch).and_then(
+            |(_, _, tone)| {
+                if tone != Tone::Flat {
+                    Some(tone)
+                } else {
+                    None
+                }
+            },
+        )
+    });
+
+    if existing_tone.is_some() {
+        chars = chars.iter().map(|&ch| strip_tone_char(ch)).collect();
+    }
+
+    let mut applied = false;
     for idx in (0..chars.len()).rev() {
-        if let Some((family, uppercase, tone)) = vowel_signature(chars[idx]) {
+        if let Some((family, uppercase, _)) = vowel_signature(chars[idx]) {
             if let Some(new_family) = mapper(family) {
-                chars[idx] = compose_vowel(new_family, uppercase, tone);
-                *buffer = chars.into_iter().collect();
-                return true;
+                chars[idx] = compose_vowel(new_family, uppercase, Tone::Flat);
+                applied = true;
+                break;
             }
         }
     }
-    false
+
+    if !applied {
+        let already_has = chars.iter().any(|&ch| {
+            if let Some((family, _, _)) = vowel_signature(ch) {
+                let base_family = match family {
+                    VowelFamily::CircumflexA | VowelFamily::BreveA => VowelFamily::PlainA,
+                    VowelFamily::CircumflexE => VowelFamily::PlainE,
+                    VowelFamily::CircumflexO | VowelFamily::HornO => VowelFamily::PlainO,
+                    VowelFamily::HornU => VowelFamily::PlainU,
+                    other => other,
+                };
+                mapper(base_family) == Some(family)
+            } else {
+                false
+            }
+        });
+        if already_has {
+            return true;
+        }
+        return false;
+    }
+
+    *buffer = chars.into_iter().collect();
+
+    if let Some(tone) = existing_tone {
+        apply_tone(buffer, tone, false);
+    }
+
+    true
 }
 
 pub fn apply_circumflex(buffer: &mut String) -> bool {
@@ -150,12 +219,42 @@ pub fn apply_circumflex(buffer: &mut String) -> bool {
 
 pub fn apply_horn(buffer: &mut String) -> bool {
     let mut chars: Vec<char> = buffer.chars().collect();
-    if apply_horn_to_slice(&mut chars) {
-        *buffer = chars.into_iter().collect();
-        true
-    } else {
-        false
+
+    let existing_tone = chars.iter().find_map(|&ch| {
+        vowel_signature(ch).and_then(
+            |(_, _, tone)| {
+                if tone != Tone::Flat {
+                    Some(tone)
+                } else {
+                    None
+                }
+            },
+        )
+    });
+
+    if existing_tone.is_some() {
+        chars = chars.iter().map(|&ch| strip_tone_char(ch)).collect();
     }
+
+    let changed = apply_horn_to_slice(&mut chars);
+
+    if !changed {
+        let already_has = chars.iter().any(|&ch| {
+            matches!(
+                vowel_signature(ch),
+                Some((VowelFamily::HornU | VowelFamily::HornO, _, _))
+            )
+        });
+        return already_has;
+    }
+
+    *buffer = chars.into_iter().collect();
+
+    if let Some(tone) = existing_tone {
+        apply_tone(buffer, tone, false);
+    }
+
+    true
 }
 
 fn apply_horn_to_slice(chars: &mut [char]) -> bool {
@@ -257,6 +356,19 @@ fn apply_vietnamese_normalization(chars: &mut Vec<char>) {
         }
     }
 
+    for idx in 0..chars.len() {
+        if let Some((VowelFamily::PlainA, uppercase, tone)) = vowel_signature(chars[idx]) {
+            if idx > 0 && idx < chars.len() - 1 {
+                let prev_base = base_char(chars[idx - 1]);
+                let next_ch = chars[idx + 1];
+                if prev_base == 'u' && !is_vowel(next_ch) {
+                    chars[idx] = compose_vowel(VowelFamily::CircumflexA, uppercase, tone);
+                    break;
+                }
+            }
+        }
+    }
+
     let len = chars.len();
     if len >= 2 {
         let last = chars[len - 1];
@@ -302,13 +414,6 @@ fn tone_target_index(chars: &[char], legacy_tone: bool) -> Option<usize> {
         return Some(last);
     }
 
-    if legacy_tone {
-        return vowels.first().copied();
-    }
-
-    // In Vietnamese orthography, 'q' is always followed by 'u' as a glide,
-    // and 'i' after 'g' is a glide when another vowel follows.
-    // The modern tone mark belongs on the vowel after the glide.
     if vowels.len() >= 2
         && vowels[0] > 0
         && base_char(chars[vowels[0]]) == 'u'
@@ -325,9 +430,6 @@ fn tone_target_index(chars: &[char], legacy_tone: bool) -> Option<usize> {
         vowels.remove(0);
     }
 
-    // Diacritic priority: if any vowel carries a non-plain mark (circumflex,
-    // breve, horn), the tone belongs on that vowel. This must be checked
-    // before cluster matching so that "uâ" (thuần) tones the â, not the u.
     for preferred in [
         VowelFamily::HornO,
         VowelFamily::CircumflexE,
@@ -341,6 +443,10 @@ fn tone_target_index(chars: &[char], legacy_tone: bool) -> Option<usize> {
         }) {
             return Some(idx);
         }
+    }
+
+    if legacy_tone {
+        return vowels.first().copied();
     }
 
     let bases: String = vowels.iter().map(|&idx| base_char(chars[idx])).collect();
