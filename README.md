@@ -155,6 +155,30 @@ To keep Bamboo installed while using HC_IME as the default Vietnamese typing
 path, set the Fcitx5 profile default to `hcime` and leave `bamboo` in the same
 input-method group.
 
+## Keyboard Shortcuts
+
+HC_IME exposes toggle actions through the Fcitx5 status area. You can bind
+keyboard shortcuts to these actions via `fcitx5-configtool`:
+
+1. Open `fcitx5-configtool`
+2. Go to **Configure Global Options** or **Configure Addons**
+3. Find the HC_IME action and assign a keybinding
+
+The following actions can be bound to shortcuts:
+
+- Switch input mode (Telex / VNI / VIQR)
+- Toggle spell check
+- Toggle auto-restore
+- Toggle preedit underline
+- Toggle quick consonant expansion
+
+Common shortcut patterns:
+
+- `Ctrl+Shift+E` — cycle input method
+- `Ctrl+Shift+S` — toggle spell check
+- `Ctrl+Shift+U` — toggle preedit underline
+- `Ctrl+Shift+Q` — toggle quick consonant expansion
+
 ## Validation
 
 Run the local end-to-end smoke gate with:

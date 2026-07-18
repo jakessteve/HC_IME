@@ -21,6 +21,11 @@ This note records the comparison that drove the current HC_IME upgrade.
   protection, per-app mode with smart switch, feature pipeline with gates,
   engine rule plugins, output strategy per app type, RCU config reload,
   ESC restore raw, macro up to 20K chars.
+- EVKey (Quanvm0501alt1 reversed source): Windows-only Vietnamese IME in C.
+  Key features: WH_KEYBOARD_LL global hook, 4-strategy key injection
+  (VK/scan code/WM_CHAR/clipboard), per-app detection via window class and
+  process name, 6 charset output classes (Unicode/VIQR/CP1258/TCVN3/NCR/
+  DoubleByte), auto-updater via GitHub release check.
 
 ## Gaps Found In HC_IME (Original)
 
@@ -76,10 +81,42 @@ This note records the comparison that drove the current HC_IME upgrade.
 - Added output mode config (Preedit/SurroundingText)
 - Status area expanded from 4 to 7 behavior toggles
 
+## Upgrade Implemented (Phase 3 — Cherry-Pick from EVKey)
+
+After reviewing the reversed EVKey source code, the following patterns were
+evaluated for applicability to the Linux/Fcitx5 architecture:
+
+#### Viable and implemented:
+- **Per-App Output Strategy**: EVKey auto-selects injection method per app
+  (VK/scan/WM_CHAR/clipboard). Adapted as per-app output mode override:
+  `SurroundingTextApps` and `PreeditApps` lists that override the global
+  `OutputMode` setting per application.
+- **Surrounding-Text Re-Sync Guard**: Inspired by EVKey's anti-loop protection
+  flag. Validates surrounding-text state consistency before computing diffs,
+  recovering cleanly when the app modifies text behind the IME.
+
+#### Evaluated and rejected (architecture mismatch):
+- **Clipboard fallback injection**: EVKey uses Win32 clipboard + Ctrl+V for
+  Metro/UWP apps. Not applicable on Linux — Fcitx5's API is fire-and-forget
+  with no failure signal, and Wayland security prevents synthetic clipboard
+  paste. The existing surrounding-text → preedit fallback covers this gap.
+- **Retry logic for failed output**: EVKey retries `SendInput` up to 10 times.
+  Fcitx5's `commitString()` and `deleteSurroundingText()` are void-returning,
+  so there is no failure signal to retry on. Replaced by the re-sync guard.
+- **Engine-level hotkeys**: EVKey maps F1-F12 via the global keyboard hook.
+  Wrong abstraction layer for Fcitx5 — hotkeys belong to Fcitx5's action
+  binding system, documented in README.md.
+
+#### Deferred (high effort, narrow use case):
+- **Legacy charset output** (TCVN3, VNI, CP1258): EVKey supports 6 output
+  encodings via polymorphic charset classes. On Linux, virtually all apps
+  expect Unicode. Documented as a remaining gap for future parity.
+
 ## Remaining Larger Parity Work
 
 - Custom keymap editor
 - Legacy charset output modes beyond Unicode
+- Legacy charset output modes (TCVN3, VNI, CP1258) — evaluated from EVKey analysis, deferred due to narrow Linux use case
 - Full uinput-based non-preedit mode (requires root daemon, like VMK)
 - Cross-process smart switch persistence (currently per-session only)
 - Combined Telex+VNI mode (intentionally excluded — user preference)

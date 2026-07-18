@@ -144,7 +144,11 @@ FCITX_CONFIGURATION(
         this, "ExcludedApps", "Apps forced to English mode (comma-separated executable names)", std::vector<std::string>()};
     Option<std::vector<std::string>> forcedVnApps{
         this, "ForcedVnApps", "Apps forced to Vietnamese mode (comma-separated executable names)", std::vector<std::string>()};
-    Option<bool> smartSwitch{this, "SmartSwitch", "Remember Vietnamese/English mode per app", false};)
+    Option<bool> smartSwitch{this, "SmartSwitch", "Remember Vietnamese/English mode per app", false};
+    Option<std::vector<std::string>> surroundingTextApps{
+        this, "SurroundingTextApps", "Apps forced to surrounding-text output mode (comma-separated executable names)", std::vector<std::string>()};
+    Option<std::vector<std::string>> preeditApps{
+        this, "PreeditApps", "Apps forced to preedit output mode (comma-separated executable names)", std::vector<std::string>()};)
 
 FCITX_CONFIGURATION(
     HcImeOutputConfig,
@@ -630,6 +634,16 @@ private:
     }
 
     void applySurroundingTextPreedit(InputContext* ic, ContextState& state, const std::string& newPreedit) {
+        if (!state.previousSurroundingText.empty()) {
+            auto currentSurrounding = ic->surroundingText().text();
+            if (!currentSurrounding.empty()) {
+                auto len = state.previousSurroundingText.size();
+                if (currentSurrounding.size() < len ||
+                    currentSurrounding.compare(currentSurrounding.size() - len, len, state.previousSurroundingText) != 0) {
+                    state.previousSurroundingText.clear();
+                }
+            }
+        }
         if (state.previousSurroundingText.empty()) {
             ic->commitString(newPreedit);
         } else {
@@ -656,6 +670,13 @@ private:
     }
 
     bool shouldUseSurroundingText(InputContext* ic, ContextState& state) {
+        auto appName = getAppName(ic);
+        if (isAppInList(appName, *config_.perApp->preeditApps)) {
+            return false;
+        }
+        if (isAppInList(appName, *config_.perApp->surroundingTextApps)) {
+            return true;
+        }
         if (*config_.output->outputMode != HcImeOutputMode::SurroundingText) {
             return false;
         }

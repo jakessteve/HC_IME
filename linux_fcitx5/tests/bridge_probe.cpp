@@ -28,6 +28,11 @@ public:
         focusIn();
     }
 
+    explicit MockInputContext(InputContextManager& manager, const std::string& program) : InputContext(manager, program) {
+        created();
+        focusIn();
+    }
+
     ~MockInputContext() override {
         destroy();
     }
@@ -44,10 +49,26 @@ public:
 protected:
     void commitStringImpl(const std::string& text) override {
         commits.push_back(text);
+        if (surroundingText().isValid()) {
+            auto cur = surroundingText().text();
+            auto newPos = static_cast<unsigned int>(cur.size() + text.size());
+            surroundingText().setText(std::string(cur) + text, newPos, newPos);
+        }
     }
 
     void deleteSurroundingTextImpl(int offset, unsigned int size) override {
         surroundingDeletes.emplace_back(offset, size);
+        if (surroundingText().isValid()) {
+            auto cur = surroundingText().text();
+            auto curLen = static_cast<int>(cur.size());
+            int start = curLen + offset;
+            if (start < 0) start = 0;
+            auto end = start + static_cast<int>(size);
+            if (end > curLen) end = curLen;
+            auto next = std::string(cur.substr(0, start)) + std::string(cur.substr(end));
+            auto pos = static_cast<unsigned int>(start);
+            surroundingText().setText(next, pos, pos);
+        }
     }
 
     void forwardKeyImpl(const ForwardKeyEvent& key) override {
@@ -295,6 +316,80 @@ int main() {
         require(send(engine, entry, ic, FcitxKey_a), "VIQR a accepted");
         require(send(engine, entry, ic, FcitxKey_apostrophe), "VIQR boundary accepted");
         require(ic.inputPanel().clientPreedit().toString() == "á", "VIQR mode composes boundary triggers");
+    }
+
+    {
+        InputContextManager manager;
+        MockInputContext ic(manager, "firefox");
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        InputContextEvent activateEvent(&ic, EventType::InputContextInputMethodActivated);
+        engine.activate(entry, activateEvent);
+        RawConfig config;
+        config.setValueByPath("Output/OutputMode", "SurroundingText");
+        config.setValueByPath("PerApp/PreeditApps/0", "firefox");
+        engine.setConfig(config);
+
+        require(send(engine, entry, ic, FcitxKey_a), "per-app preedit a accepted");
+        require(ic.inputPanel().clientPreedit().toString() == "a", "per-app preedit override uses preedit for firefox");
+        require(ic.commits.empty(), "per-app preedit override does not commit via surrounding text");
+        require(ic.surroundingDeletes.empty(), "per-app preedit override does not delete surrounding text");
+    }
+
+    {
+        InputContextManager manager;
+        MockInputContext ic(manager, "chromium");
+        ic.setCapabilityFlags(CapabilityFlags(CapabilityFlag::SurroundingText));
+        ic.surroundingText().setText("test", 4, 4);
+        ic.updateSurroundingText();
+
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        InputContextEvent activateEvent(&ic, EventType::InputContextInputMethodActivated);
+        engine.activate(entry, activateEvent);
+        RawConfig config;
+        config.setValueByPath("Output/OutputMode", "Preedit");
+        config.setValueByPath("PerApp/SurroundingTextApps/0", "chromium");
+        engine.setConfig(config);
+
+        require(send(engine, entry, ic, FcitxKey_a), "per-app surrounding-text a accepted");
+        require(ic.commits.size() == 1 && ic.commits.back() == "a", "per-app surrounding-text override commits for chromium");
+        require(ic.inputPanel().clientPreedit().toString().empty(), "per-app surrounding-text override avoids client preedit");
+    }
+
+    {
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        ic.setCapabilityFlags(CapabilityFlags(CapabilityFlag::SurroundingText));
+        ic.surroundingText().setText("hello", 5, 5);
+        ic.updateSurroundingText();
+
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        InputContextEvent activateEvent(&ic, EventType::InputContextInputMethodActivated);
+        engine.activate(entry, activateEvent);
+        RawConfig config;
+        config.setValueByPath("Output/OutputMode", "SurroundingText");
+        engine.setConfig(config);
+
+        require(send(engine, entry, ic, FcitxKey_a), "re-sync a accepted");
+        require(ic.commits.size() == 1 && ic.commits.back() == "a", "re-sync first key commits a");
+
+        require(send(engine, entry, ic, FcitxKey_s), "re-sync tone accepted");
+        require(ic.commits.size() == 2 && ic.commits.back() == "á", "re-sync second key commits á");
+
+        ic.surroundingText().setText("hello world", 11, 11);
+        ic.updateSurroundingText();
+
+        auto commitsBeforeResync = ic.commits.size();
+        auto deletesBeforeResync = ic.surroundingDeletes.size();
+
+        require(send(engine, entry, ic, FcitxKey_w), "re-sync w accepted");
+        require(ic.commits.size() == commitsBeforeResync + 1, "re-sync after app modification commits new text");
+        require(ic.surroundingDeletes.size() == deletesBeforeResync, "re-sync after app modification does not delete stale surrounding");
     }
 
     std::cout << "HC_IME bridge probe passed\n";

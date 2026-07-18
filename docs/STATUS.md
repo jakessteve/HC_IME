@@ -32,8 +32,14 @@ cleanup and documentation sync.
   library resolution, and FFI exports.
 - The latest validated e2e sweep passed after the dictionary-cache fix and the
   surrounding-text bridge cleanup.
+- Per-app output strategy overrides the global output mode: apps listed in
+  `SurroundingTextApps` always use surrounding-text output, and apps listed in
+  `PreeditApps` always use client preedit, regardless of the global setting.
+- The surrounding-text path includes a re-sync guard that detects when the
+  application modifies surrounding text behind the IME and recovers cleanly
+  by committing the new preedit directly instead of computing a stale diff.
 
-## Cherry-Picked Features (from VMK + VKey analysis)
+## Cherry-Picked Features (from VMK + VKey + EVKey analysis)
 
 ### Quick Consonant Expansion
 - Mid-word: `cc`→`ch`, `gg`→`gi`, `nn`→`ng`, `uu`→`ư`
@@ -78,6 +84,20 @@ cleanup and documentation sync.
   incremental updates
 - Configurable via `OutputMode` setting (Preedit/SurroundingText)
 - Falls back to standard preedit when surrounding text is unavailable
+
+### Per-App Output Strategy (from EVKey analysis)
+- `SurroundingTextApps`: List of app names forced to use surrounding-text output
+- `PreeditApps`: List of app names forced to use client preedit output
+- Per-app lists override the global `OutputMode` setting
+- Uses the same case-insensitive substring matching as `ExcludedApps`
+- Configured under the `PerApp` section in `hcime.conf`
+
+### Surrounding-Text Re-Sync Guard
+- Validates that the current surrounding text ends with the previously
+  inserted preedit before computing a diff
+- On mismatch (app-side edit, auto-correct, or focus change), clears the
+  tracked state and commits the new preedit directly
+- Prevents stale `deleteSurroundingText` calls that would corrupt text
 
 ## FFI Surface
 
