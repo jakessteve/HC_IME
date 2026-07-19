@@ -1,0 +1,28 @@
+#!/bin/bash
+cat << 'RUST' > hc_core/src/bin/test_telex.rs
+use hc_core::*;
+
+fn main() {
+    let mut session = hc_session_new(0, 0); // 0 is Telex
+    let reqs = ["w", "o", "r", "k", "f", "l", "o", "w"];
+    for ch in reqs {
+        let req = HC_KeyRequest {
+            kind: HCKeyKind::Printable as i32,
+            text: std::ffi::CString::new(ch).unwrap().into_raw(),
+            input_mode: 0,
+            legacy_tone: 0,
+            spell_check: 0, // off
+            auto_restore: 0, // off
+            quick_consonants: 0,
+            english_protection: 0,
+            macro_in_english: 0,
+            esc_restore_raw: 0,
+        };
+        let res = hc_session_handle_key_utf8(session, &req);
+        let s = unsafe { std::ffi::CStr::from_ptr(res.composition_string).to_str().unwrap() };
+        println!("After {}: {}", ch, s);
+    }
+}
+RUST
+
+cargo run --manifest-path hc_core/Cargo.toml --bin test_telex
