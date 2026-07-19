@@ -1854,3 +1854,229 @@ fn test_tone_then_circumflex_vni() {
 
     hc_session_free(session);
 }
+
+#[test]
+fn vni_workflow_should_not_apply_telex_transforms() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+
+    // Type "workflow" char by char and check preedit at each step
+    let preedit_w = type_raw(session, &mut req, "w");
+    assert_eq!(
+        preedit_w, "w",
+        "after 'w' preedit should be 'w', got '{}'",
+        preedit_w
+    );
+
+    let preedit_wo = type_raw(session, &mut req, "o");
+    assert_eq!(
+        preedit_wo, "wo",
+        "after 'wo' preedit should be 'wo', got '{}'",
+        preedit_wo
+    );
+
+    let preedit_wor = type_raw(session, &mut req, "r");
+    assert_eq!(
+        preedit_wor, "wor",
+        "after 'wor' preedit should be 'wor', got '{}'",
+        preedit_wor
+    );
+
+    let preedit_work = type_raw(session, &mut req, "k");
+    assert_eq!(
+        preedit_work, "work",
+        "after 'work' preedit should be 'work', got '{}'",
+        preedit_work
+    );
+
+    let preedit_workf = type_raw(session, &mut req, "f");
+    assert_eq!(
+        preedit_workf, "workf",
+        "after 'workf' preedit should be 'workf' (no Telex tone!), got '{}'",
+        preedit_workf
+    );
+
+    let preedit_workfl = type_raw(session, &mut req, "l");
+    assert_eq!(
+        preedit_workfl, "workfl",
+        "after 'workfl', got '{}'",
+        preedit_workfl
+    );
+
+    let preedit_workflo = type_raw(session, &mut req, "o");
+    assert_eq!(
+        preedit_workflo, "workflo",
+        "after 'workflo', got '{}'",
+        preedit_workflo
+    );
+
+    let preedit_workflow = type_raw(session, &mut req, "w");
+    assert_eq!(
+        preedit_workflow, "workflow",
+        "final preedit should be 'workflow', got '{}'",
+        preedit_workflow
+    );
+
+    // Also verify commit
+    let (committed, _status) = commit_with_space(session, &mut req);
+    assert_eq!(
+        committed, "workflow",
+        "committed text should be 'workflow', got '{}'",
+        committed
+    );
+
+    hc_session_free(session);
+}
+
+#[test]
+fn vni_english_words_preedit_no_telex_transforms() {
+    // English words containing Telex trigger characters:
+    // s→sắc, f→huyền, r→hỏi, x→ngã, j→nặng, w→horn, z→cancel
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+
+    let english_words = [
+        "system",
+        "software",
+        "export",
+        "express",
+        "project",
+        "refresh",
+        "fix",
+        "just",
+        "major",
+        "subject",
+        "forward",
+        "switch",
+        "framework",
+        "firefox",
+        "windows",
+        "result",
+        "request",
+        "review",
+        "service",
+        "server",
+        "offset",
+        "buffer",
+        "differ",
+        "offer",
+        "suffer",
+    ];
+
+    for word in english_words {
+        hc_session_reset(session);
+        let result = type_raw(session, &mut req, word);
+        assert_eq!(
+            result, word,
+            "VNI preedit for '{}' should be unchanged, got '{}'",
+            word, result
+        );
+    }
+
+    hc_session_free(session);
+}
+
+#[test]
+fn vni_english_words_commit_auto_restores() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+
+    // Words in the English dictionary should commit as-is
+    let known_english = ["workflow", "system", "project", "export"];
+
+    for word in known_english {
+        hc_session_reset(session);
+        type_raw(session, &mut req, word);
+        let (committed, status) = commit_with_space(session, &mut req);
+        assert_eq!(
+            committed, word,
+            "VNI commit for English word '{}' should be '{}', got '{}'",
+            word, word, committed
+        );
+        assert_eq!(
+            status,
+            HCStatusFlag::EnglishFallback as i32,
+            "English word '{}' should commit with EnglishFallback status",
+            word
+        );
+    }
+
+    hc_session_free(session);
+}
+
+#[test]
+fn vni_does_not_cross_contaminate_with_telex_triggers() {
+    // Verify that specific Telex trigger characters have NO effect in VNI mode
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+
+    // Type "hoas" — in Telex 's' would apply sắc to 'a', but in VNI it should be literal
+    let result = type_raw(session, &mut req, "hoas");
+    assert_eq!(
+        result, "hoas",
+        "VNI: 'hoas' should not apply Telex 's' tone, got '{}'",
+        result
+    );
+
+    hc_session_reset(session);
+
+    // Type "hoaf" — in Telex 'f' would apply huyền to 'a', but in VNI it should be literal
+    let result = type_raw(session, &mut req, "hoaf");
+    assert_eq!(
+        result, "hoaf",
+        "VNI: 'hoaf' should not apply Telex 'f' tone, got '{}'",
+        result
+    );
+
+    hc_session_reset(session);
+
+    // Type "hoar" — in Telex 'r' would apply hỏi to 'a', but in VNI it should be literal
+    let result = type_raw(session, &mut req, "hoar");
+    assert_eq!(
+        result, "hoar",
+        "VNI: 'hoar' should not apply Telex 'r' tone, got '{}'",
+        result
+    );
+
+    hc_session_reset(session);
+
+    // Type "hoax" — in Telex 'x' would apply ngã to 'a', but in VNI it should be literal
+    let result = type_raw(session, &mut req, "hoax");
+    assert_eq!(
+        result, "hoax",
+        "VNI: 'hoax' should not apply Telex 'x' tone, got '{}'",
+        result
+    );
+
+    hc_session_reset(session);
+
+    // Type "hoaj" — in Telex 'j' would apply nặng to 'a', but in VNI it should be literal
+    let result = type_raw(session, &mut req, "hoaj");
+    assert_eq!(
+        result, "hoaj",
+        "VNI: 'hoaj' should not apply Telex 'j' tone, got '{}'",
+        result
+    );
+
+    hc_session_reset(session);
+
+    // Type "hoaw" — in Telex 'w' would apply horn/breve, but in VNI it should be literal
+    let result = type_raw(session, &mut req, "hoaw");
+    assert_eq!(
+        result, "hoaw",
+        "VNI: 'hoaw' should not apply Telex 'w' diacritic, got '{}'",
+        result
+    );
+
+    hc_session_reset(session);
+
+    // Type "hoaz" — in Telex 'z' would cancel marks, but in VNI it should be literal
+    let result = type_raw(session, &mut req, "hoaz");
+    assert_eq!(
+        result, "hoaz",
+        "VNI: 'hoaz' should not apply Telex 'z' cancel, got '{}'",
+        result
+    );
+
+    hc_session_free(session);
+}

@@ -21,6 +21,7 @@
 #include <fcitx-utils/utf8.h>
 #include <fcitx-utils/key.h>
 #include <fcitx-utils/standardpaths.h>
+#include <fcitx-utils/log.h>
 
 #include <algorithm>
 #include <array>
@@ -378,11 +379,20 @@ public:
         if (instance_ != nullptr) {
             RawConfig rawConfig;
             readAsIni(rawConfig, StandardPathsType::Config, kConfigPath);
+            bool hadLegacyKeys = (rawConfig.valueByPath("InputMethod") != nullptr &&
+                                  rawConfig.valueByPath("Input/InputMethod") == nullptr);
             migrateLegacyConfig(rawConfig);
             config_.load(rawConfig, true);
+            if (hadLegacyKeys) {
+                // Re-save in the new sectioned format so legacy keys are not re-parsed
+                safeSaveAsIni(config_, StandardPathsType::Config, kConfigPath);
+            }
         }
         applyRuntimeConfig();
         refreshStatusMenu();
+        FCITX_INFO() << "HC_IME: active input mode = " << modeLabel(*config_.input->inputMode)
+                     << ", spellCheck=" << *config_.behavior->spellCheck
+                     << ", autoRestore=" << *config_.behavior->autoRestore;
     }
 
     void save() override {

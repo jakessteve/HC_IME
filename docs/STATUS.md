@@ -32,6 +32,9 @@ cleanup and documentation sync.
   library resolution, and FFI exports.
 - The latest validated e2e sweep passed after the dictionary-cache fix and the
   surrounding-text bridge cleanup.
+- VNI mode includes specialized handling for English words containing Telex 
+  trigger characters (s, f, r, x, j, w, z) to prevent cross-contamination and
+  false diacritic application during composition.
 - Per-app output strategy overrides the global output mode: apps listed in
   `SurroundingTextApps` always use surrounding-text output, and apps listed in
   `PreeditApps` always use client preedit, regardless of the global setting.
