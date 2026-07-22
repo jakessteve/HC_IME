@@ -1,15 +1,16 @@
 # HC_IME Status
 
 This document is the local source of truth for the current repo snapshot.
-It reflects the validated state of the codebase at the time of the latest
-cleanup and documentation sync.
+It reflects the `0cd9ab3` codebase snapshot and records only behavior backed
+by the repository's tests or end-to-end smoke gate.
 
 ## Current Shape
 
 - Rust core in `hc_core/` implements Telex, VNI, and VIQR composition.
 - `linux_fcitx5/` provides the Fcitx5 addon, metadata, and install rules.
 - `scripts/e2e-smoke.sh` is the repo's local end-to-end validation gate.
-- `README.md` describes the architecture, build flow, native UI, and packaging.
+- `README.md` is the Vietnamese user guide for architecture, Hán Nôm workflow,
+  configuration, build, and validation.
 
 ## Validated Behaviors
 
@@ -17,12 +18,12 @@ cleanup and documentation sync.
   engine.
 - Tone placement, diacritic transforms, reconversion, and raw-keystroke replay
   are implemented in the Rust core.
-- The addon exposes a single configurable HC_IME entry with a selectable
-  Telex/VNI/VIQR mode and behavior toggles.
+- The addon exposes one configurable HC_IME entry with Telex, VNI, VIQR, and
+  Hán Nôm Telex/VNI/VIQR modes plus behavior toggles.
 - Native Fcitx5 config controls input mode, legacy tone placement, spell
   check, auto-restore, underline behavior, and dictionary paths.
-- The status menu includes a `Settings` launcher that opens the native Fcitx5
-  configuration tool for HC_IME.
+- Fcitx5 exposes native configuration and status-area actions for HC_IME;
+  configure them through `fcitx5-configtool`.
 - External dictionary lookups reload when `HC_IME_VI_DICT` or `HC_IME_EN_DICT`
   changes, so config updates do not stay pinned to the first loaded file.
 - The addon can switch between preedit and surrounding-text output using the
@@ -35,14 +36,18 @@ cleanup and documentation sync.
 - VNI mode includes specialized handling for English words containing Telex 
   trigger characters (s, f, r, x, j, w, z) to prevent cross-contamination and
   false diacritic application during composition.
-- Hán Nôm core engine & Fcitx5 addon feature fully implemented across all 7 Epics (Tasks T1.0 - T7.3):
+- Hán Nôm core engine and Fcitx5 addon are implemented across the seven planned
+  feature areas (T1.0–T7.3):
   - Data Pipeline (E1): Parsed Unihan, NomStandardization, cake_gao, pearapple123 into binary format v1 `hc_core/data/han_nom_dict.bin` (7,114 unique readings, 19,134 unique characters, 14,297 Extension B+ Nôm characters).
   - Composition Engine Refactor (E2): Extracted `TypingEngine` in `hc_core/src/compose.rs` supporting `Inline` & `Dictionary` composition modes.
   - Core Nom Module (E3): Implemented dual-phase engine (`Reading` & `Candidate` phases), exact & toneless lookups, and candidate pagination.
   - FFI Layer (E4): Added `hc_session_handle_key_hannom` and `hc_nom_dict_status` to Rust C ABI & `hc_core_ffi.h`.
   - Fcitx5 Addon Integration (E5): Extended `HcImeInputMode` enum (`HanNomTelex`, `HanNomVni`, `HanNomViqr`), wired `CommonCandidateList` UI, and updated status menu.
-  - Validation & Tests (E6): Added 134 Rust unit tests (stress test, Ext B+ safety, error fallback, CJK IME UX alignment, live Hán Nôm candidate prediction) and bridge probe test suite.
-  - Verification (E7): 100% test pass rate across `cargo test` (134 tests) and `./scripts/e2e-smoke.sh`.
+  - Validation & Tests (E6): Rust unit tests cover stress behavior, Extension
+    B+ safety, error fallback, CJK IME UX alignment, and live Hán Nôm candidate
+    prediction; the addon has a bridge-probe suite.
+  - Verification (E7): `scripts/e2e-smoke.sh` is the current end-to-end gate;
+    its fresh result is recorded below after each documentation sync.
 - CJK IME UX Alignment: Candidate Phase (Phase B) now distinguishes `Space` (commits Hán Nôm Candidate #1) from `Enter` (commits raw pre-edit reading / Quốc ngữ string); supports candidate pagination via `PageUp`/`PageDown`, `=`, `-`, `[`, `]`; and auto-commits Candidate #1 + punctuation on ASCII punctuation input.
 - Interactive Candidate Navigation: Arrow keys (`Up`/`Down`/`Left`/`Right`) and `Tab`/`Shift+Tab` move the highlight cursor across candidate items via `CommonCandidateList::nextCandidate()`/`prevCandidate()`. Pressing `Enter` while a candidate is highlighted commits that glyph; pressing `Enter` with no highlight (`cursorIndex == -1`) commits the raw Quốc ngữ reading. `PageUp`/`PageDown` remain dedicated to page turning.
 - Fcitx5 UI Lifecycle Fix: `updateHanNomUi` now calls `setCandidateList()`, then `setPreedit()`/`updatePreedit()`, then `updateUserInterface()`, so the candidate popup and client preedit are refreshed together during live Hán Nôm prediction.
@@ -136,6 +141,12 @@ New borrowed-output ABI:
 - Legacy charset output modes beyond Unicode
 - Full uinput-based non-preedit mode (requires root daemon, like VMK)
 - Cross-process smart switch persistence (currently per-session only)
+
+## Latest Verification
+
+- 2026-07-22: `scripts/e2e-smoke.sh` passed for `0cd9ab3` with 134 Rust tests,
+  Clippy, the Fcitx5 bridge probe, staged installation, metadata checks,
+  runtime-linkage checks, and ABI-export checks.
 
 ## Related Docs
 
