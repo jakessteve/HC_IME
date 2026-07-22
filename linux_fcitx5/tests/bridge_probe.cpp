@@ -115,7 +115,7 @@ int main() {
         InputContextEvent activateEvent(&ic, EventType::InputContextInputMethodActivated);
         engine.activate(entry, activateEvent);
         const auto actions = hcimeStatusActions(ic);
-        require(actions.size() == 11, "status menu exposes six modes, a separator, and four behavior toggles");
+        require(actions.size() == 14, "status menu exposes six modes, a separator, phrase controls, and reset");
         require(actions[0]->shortText(&ic) == "VNI", "status menu includes VNI mode");
         require(actions[1]->shortText(&ic) == "TELEX", "status menu includes Telex mode");
         require(actions[2]->shortText(&ic) == "VIQR", "status menu includes VIQR mode");
@@ -497,16 +497,42 @@ int main() {
         require(send(engine, entry, ic, FcitxKey_a), "HanNom page a accepted");
         require(send(engine, entry, ic, FcitxKey_m), "HanNom page m accepted");
         require(ic.inputPanel().candidateList() != nullptr, "HanNom page candidateList exists");
-        require(send(engine, entry, ic, FcitxKey_Page_Down), "HanNom PageDown accepted for candidate list");
-        require(send(engine, entry, ic, FcitxKey_Page_Up), "HanNom PageUp accepted for candidate list");
+        require(ic.inputPanel().candidateList()->size() == 9, "HanNom page test has a second candidate page");
+        const auto pageOneFirst = candidateText(*ic.inputPanel().candidateList(), 0);
+        require(send(engine, entry, ic, FcitxKey_Page_Down), "HanNom PageDown moves candidate page");
+        require(candidateText(*ic.inputPanel().candidateList(), 0) != pageOneFirst,
+                "HanNom PageDown changes displayed candidates");
+        require(send(engine, entry, ic, FcitxKey_Page_Up), "HanNom PageUp restores candidate page");
+        require(candidateText(*ic.inputPanel().candidateList(), 0) == pageOneFirst,
+                "HanNom PageUp restores displayed candidates");
         require(send(engine, entry, ic, FcitxKey_Escape), "HanNom Escape returns to reading after paging");
 
-        require(send(engine, entry, ic, FcitxKey_space), "HanNom space accepted");
-        require(ic.inputPanel().candidateList() != nullptr, "HanNom space populates candidateList");
-        require(ic.inputPanel().candidateList()->size() > 0, "HanNom candidateList is non-empty");
-        require(send(engine, entry, ic, FcitxKey_1), "HanNom digit 1 accepted");
-        require(ic.commits.size() == 2, "HanNom digit 1 commits selected character");
-        require(ic.inputPanel().candidateList() == nullptr, "HanNom selection clears candidateList");
+    }
+
+    {
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        RawConfig config;
+        config.setValueByPath("InputMethod", "HanNomTelex");
+        engine.setConfig(config);
+
+        for (auto key : {FcitxKey_t, FcitxKey_h, FcitxKey_a, FcitxKey_n, FcitxKey_h, FcitxKey_f}) {
+            require(send(engine, entry, ic, key), "phrase first word key accepted");
+        }
+        require(send(engine, entry, ic, FcitxKey_space), "phrase delimiter accepted");
+        require(ic.inputPanel().candidateList() != nullptr && ic.inputPanel().candidateList()->size() > 0,
+                "first phrase word shows typeahead predictions");
+        for (auto key : {FcitxKey_p, FcitxKey_h, FcitxKey_o, FcitxKey_o, FcitxKey_s}) {
+            require(send(engine, entry, ic, key), "phrase second word key accepted");
+        }
+        require(ic.inputPanel().candidateList() != nullptr, "exact phrase keeps candidates visible");
+        require(candidateText(*ic.inputPanel().candidateList(), 0) == "城庯", "phrase candidate renders full glyph string");
+        require(send(engine, entry, ic, FcitxKey_Down), "phrase arrow focuses candidate");
+        require(send(engine, entry, ic, FcitxKey_Return), "phrase focused Enter accepted");
+        require(ic.commits.size() == 1 && ic.commits.back() == "城庯", "phrase focused Enter commits full candidate");
     }
 
     std::cout << "HC_IME bridge probe passed\n";

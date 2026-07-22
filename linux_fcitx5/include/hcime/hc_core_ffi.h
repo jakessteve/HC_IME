@@ -116,6 +116,32 @@ typedef struct HC_HanNomResult {
     uint8_t handled;
 } HC_HanNomResult;
 
+/* V2 is additive: strings are borrowed until the next Hán Nôm call on this
+ * session, allowing phrases and Extension-B+ characters without changing V1. */
+typedef struct HC_HanNomCandidateText {
+    const uint8_t* text;
+    uint16_t text_len;
+    const uint8_t* reading;
+    uint16_t reading_len;
+    uint8_t kind; /* exact=0, prediction=1, fallback=2, single=3 */
+} HC_HanNomCandidateText;
+
+typedef struct HC_HanNomResultV2 {
+    int32_t status_flag;
+    int32_t error_code;
+    const uint8_t* reading;
+    uint16_t reading_len;
+    const HC_HanNomCandidateText* candidates;
+    uint16_t candidate_count;
+    uint8_t handled;
+} HC_HanNomResultV2;
+
+typedef struct HC_HanNomOptions {
+    uint8_t phrase_prediction;
+    uint8_t learning_enabled;
+    const char* history_path;
+} HC_HanNomOptions;
+
 enum HC_InputMode {
     HC_INPUT_TELEX = 0,
     HC_INPUT_VNI = 1,
@@ -154,6 +180,11 @@ void hc_session_clear_macros(void* session);
 HC_KeyResult hc_session_handle_key(void* session, const HC_KeyRequest* request);
 HC_Utf8KeyResult hc_session_handle_key_utf8(void* session, const HC_KeyRequest* request);
 int32_t hc_session_handle_key_hannom(void* session, const HC_KeyRequest* request, HC_HanNomResult* result);
+int32_t hc_session_handle_key_hannom_v2(void* session, const HC_KeyRequest* request, HC_HanNomResultV2* result);
+int32_t hc_session_select_hannom_candidate_v2(void* session, uint16_t index, HC_HanNomResultV2* result);
+void hc_session_set_hannom_options(void* session, const HC_HanNomOptions* options);
+void hc_session_reset_hannom_learning(void* session);
+void hc_session_flush_hannom_learning(void* session);
 int32_t hc_nom_dict_status(void* session);
 
 #ifdef __cplusplus

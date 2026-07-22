@@ -123,6 +123,9 @@ enum class HcImeMenuItem {
     AutoRestore,
     DisplayUnderline,
     QuickConsonants,
+    PhrasePrediction,
+    LearnPhraseRanking,
+    ResetHanNomLearning,
 };
 
 FCITX_CONFIGURATION(
@@ -138,7 +141,9 @@ FCITX_CONFIGURATION(
     Option<bool> quickConsonants{this, "QuickConsonants", "Enable quick consonant expansion (cc->ch, nn->ng, f->ph, etc.)", false};
     Option<HcImeEnglishProtection> englishProtection{this, "EnglishProtection", "English protection level", HcImeEnglishProtection::Off};
     Option<bool> macroInEnglish{this, "MacroInEnglish", "Allow macro expansion in English mode", false};
-    Option<bool> escRestoreRaw{this, "EscRestoreRaw", "ESC key restores raw keystrokes", false};)
+    Option<bool> escRestoreRaw{this, "EscRestoreRaw", "ESC key restores raw keystrokes", false};
+    Option<bool> phrasePrediction{this, "PhrasePrediction", "Predict common two-word Hán Nôm phrases", true};
+    Option<bool> learnPhraseRanking{this, "LearnPhraseRanking", "Learn selected Hán Nôm phrase ranking locally", true};)
 
 FCITX_CONFIGURATION(
     HcImeDictionaryConfig,
@@ -406,13 +411,9 @@ public:
         const bool useSurroundingText = shouldUseSurroundingText(ic, state);
         if (!ensureHanNomCandidatePhase(ic, state, mode, useSurroundingText)) return;
 
-        char digitChar = '1' + static_cast<char>(candidateIndex % 9);
-        char textBuf[2] = {digitChar, '\0'};
-        HC_KeyRequest request = makeKeyRequest(HC_KEY_PRINTABLE, textBuf, mode);
-        HC_HanNomResult nomResult;
+        HC_HanNomResultV2 nomResult;
         std::memset(&nomResult, 0, sizeof(nomResult));
-        if (hc_session_handle_key_hannom(state.session.ptr, &request, &nomResult) != 0) {
-            updateHanNomPhase(state, request, nomResult);
+        if (hc_session_select_hannom_candidate_v2(state.session.ptr, static_cast<uint16_t>(candidateIndex), &nomResult) != 0) {
             updateHanNomUi(ic, state, nomResult, useSurroundingText);
         }
     }
@@ -533,9 +534,9 @@ public:
                        event.key().check(FcitxKey_Next) || event.key().check(FcitxKey_KP_Next)) {
                 if (!ensureHanNomCandidatePhase(ic, state, mode, useSurroundingText)) return;
                 auto navRequest = makeKeyRequest(HC_KEY_PRINTABLE, "=", mode);
-                HC_HanNomResult nomResult;
+                HC_HanNomResultV2 nomResult;
                 std::memset(&nomResult, 0, sizeof(nomResult));
-                if (hc_session_handle_key_hannom(state.session.ptr, &navRequest, &nomResult) != 0) {
+                if (hc_session_handle_key_hannom_v2(state.session.ptr, &navRequest, &nomResult) != 0) {
                     updateHanNomPhase(state, navRequest, nomResult);
                     updateHanNomUi(ic, state, nomResult, useSurroundingText);
                     event.filterAndAccept();
@@ -545,9 +546,9 @@ public:
                        event.key().check(FcitxKey_Prior) || event.key().check(FcitxKey_KP_Prior)) {
                 if (!ensureHanNomCandidatePhase(ic, state, mode, useSurroundingText)) return;
                 auto navRequest = makeKeyRequest(HC_KEY_PRINTABLE, "-", mode);
-                HC_HanNomResult nomResult;
+                HC_HanNomResultV2 nomResult;
                 std::memset(&nomResult, 0, sizeof(nomResult));
-                if (hc_session_handle_key_hannom(state.session.ptr, &navRequest, &nomResult) != 0) {
+                if (hc_session_handle_key_hannom_v2(state.session.ptr, &navRequest, &nomResult) != 0) {
                     updateHanNomPhase(state, navRequest, nomResult);
                     updateHanNomUi(ic, state, nomResult, useSurroundingText);
                     event.filterAndAccept();
@@ -560,6 +561,14 @@ public:
                     return;
                 }
                 if (candidateList != nullptr && candidateList->size() > 0 && commitHanNomReading(ic, state, mode, useSurroundingText)) {
+                    event.filterAndAccept();
+                    return;
+                }
+            } else if (candidateList != nullptr && candidateList->cursorIndex() >= 0 &&
+                       input.size() == 1 && input[0] >= '1' && input[0] <= '9') {
+                const int index = input[0] - '1';
+                if (index < candidateList->size()) {
+                    selectHanNomCandidate(ic, index);
                     event.filterAndAccept();
                     return;
                 }
@@ -597,9 +606,9 @@ public:
         }
 
         if (mode >= 3 && mode <= 5) {
-            HC_HanNomResult nomResult;
+            HC_HanNomResultV2 nomResult;
             std::memset(&nomResult, 0, sizeof(nomResult));
-            int32_t handled = hc_session_handle_key_hannom(state.session.ptr, &request, &nomResult);
+            int32_t handled = hc_session_handle_key_hannom_v2(state.session.ptr, &request, &nomResult);
             if (handled == 0) return;
 
             updateHanNomPhase(state, request, nomResult);
@@ -690,6 +699,7 @@ public:
         if (state.session.ptr == nullptr) {
             state.session.ptr = hc_session_new(toSessionInputMode(*config_.input->inputMode), 0);
             loadMacrosIntoSession(state.session.ptr, *config_.macroFilePath);
+            configureHanNomOptions(state.session.ptr);
         }
         attachStatusMenu(event.inputContext());
     }
@@ -702,7 +712,10 @@ public:
                 event.inputContext()->deleteSurroundingText(-static_cast<int>(surroundingLen), surroundingLen);
             }
         }
-        if (state.session.ptr != nullptr) hc_session_reset(state.session.ptr);
+        if (state.session.ptr != nullptr) {
+            hc_session_flush_hannom_learning(state.session.ptr);
+            hc_session_reset(state.session.ptr);
+        }
         state.hasActivePreedit = false;
         state.hanNomCandidatePhase = false;
         state.lastCommitTrailingChars = 0;
@@ -721,7 +734,10 @@ public:
                 event.inputContext()->deleteSurroundingText(-static_cast<int>(surroundingLen), surroundingLen);
             }
         }
-        if (state.session.ptr != nullptr) hc_session_reset(state.session.ptr);
+        if (state.session.ptr != nullptr) {
+            hc_session_flush_hannom_learning(state.session.ptr);
+            hc_session_reset(state.session.ptr);
+        }
         state.hasActivePreedit = false;
         state.hanNomCandidatePhase = false;
         state.lastCommitTrailingChars = 0;
@@ -829,9 +845,20 @@ private:
 
     ContextState& stateFor(InputContext* ic) { return contexts_[ic->uuid()]; }
 
+    void configureHanNomOptions(void* session) {
+        if (session == nullptr) return;
+        HC_HanNomOptions options{static_cast<uint8_t>(*config_.behavior->phrasePrediction),
+                                 static_cast<uint8_t>(*config_.behavior->learnPhraseRanking), nullptr};
+        hc_session_set_hannom_options(session, &options);
+    }
+
     void resetAllSessions() {
         for (auto& [_, state] : contexts_) {
-            if (state.session.ptr != nullptr) hc_session_reset(state.session.ptr);
+            if (state.session.ptr != nullptr) {
+                hc_session_flush_hannom_learning(state.session.ptr);
+                hc_session_reset(state.session.ptr);
+                configureHanNomOptions(state.session.ptr);
+            }
             state.hasActivePreedit = false;
             state.hanNomCandidatePhase = false;
             state.lastCommitTrailingChars = 0;
@@ -912,49 +939,16 @@ private:
         event.filterAndAccept();
     }
 
-    void updateHanNomPhase(ContextState& state, const HC_KeyRequest& request, const HC_HanNomResult& nomResult) {
-        if (nomResult.status_flag == HC_STATUS_COMMIT || nomResult.error_code < 0 ||
-            nomResult.reading_len == 0 || nomResult.candidate_count == 0) {
-            state.hanNomCandidatePhase = false;
-            return;
-        }
-
-        if (request.kind == HC_KEY_SPACE) {
-            state.hanNomCandidatePhase = true;
-            return;
-        }
-
-        if (request.kind == HC_KEY_ESCAPE || request.kind == HC_KEY_BACKSPACE) {
-            state.hanNomCandidatePhase = false;
-            return;
-        }
-
-        if (state.hanNomCandidatePhase && request.kind == HC_KEY_PRINTABLE && request.text != nullptr) {
-            const char ch = request.text[0];
-            if ((ch >= '1' && ch <= '9') || ch == '=' || ch == '+' || ch == ']' || ch == '-' || ch == '[') {
-                return;
-            }
-        }
-
-        state.hanNomCandidatePhase = false;
+    void updateHanNomPhase(ContextState& state, const HC_KeyRequest&, const HC_HanNomResultV2& nomResult) {
+        state.hanNomCandidatePhase = nomResult.status_flag != HC_STATUS_COMMIT &&
+            nomResult.error_code >= 0 && nomResult.candidate_count > 0;
     }
 
     bool ensureHanNomCandidatePhase(InputContext* ic, ContextState& state, int32_t mode, bool useSurroundingText) {
         if (state.hanNomCandidatePhase) return true;
 
-        HC_KeyRequest openRequest = makeKeyRequest(HC_KEY_SPACE, " ", mode);
-        HC_HanNomResult openResult;
-        std::memset(&openResult, 0, sizeof(openResult));
-        if (hc_session_handle_key_hannom(state.session.ptr, &openRequest, &openResult) == 0) {
-            return false;
-        }
-
-        updateHanNomPhase(state, openRequest, openResult);
-        if (!state.hanNomCandidatePhase) {
-            updateHanNomUi(ic, state, openResult, useSurroundingText);
-            return false;
-        }
-        return true;
+        (void)ic; (void)mode; (void)useSurroundingText;
+        return false;
     }
 
     bool commitHanNomReading(InputContext* ic, ContextState& state, int32_t mode, bool useSurroundingText) {
@@ -962,9 +956,9 @@ private:
         if (!ensureHanNomCandidatePhase(ic, state, mode, useSurroundingText)) return false;
 
         HC_KeyRequest enterRequest = makeKeyRequest(HC_KEY_ENTER, nullptr, mode);
-        HC_HanNomResult nomResult;
+        HC_HanNomResultV2 nomResult;
         std::memset(&nomResult, 0, sizeof(nomResult));
-        if (hc_session_handle_key_hannom(state.session.ptr, &enterRequest, &nomResult) == 0) {
+        if (hc_session_handle_key_hannom_v2(state.session.ptr, &enterRequest, &nomResult) == 0) {
             return false;
         }
 
@@ -973,9 +967,9 @@ private:
         return true;
     }
 
-    void updateHanNomUi(InputContext* ic, ContextState& state, const HC_HanNomResult& nomResult, bool useSurroundingText) {
+    void updateHanNomUi(InputContext* ic, ContextState& state, const HC_HanNomResultV2& nomResult, bool useSurroundingText) {
         if (nomResult.status_flag == HC_STATUS_COMMIT) {
-            std::string output(nomResult.reading, nomResult.reading_len);
+            std::string output(reinterpret_cast<const char*>(nomResult.reading), nomResult.reading_len);
             if (useSurroundingText) {
                 commitViaSurroundingText(ic, state, output);
             } else {
@@ -993,7 +987,7 @@ private:
         }
 
         if (nomResult.status_flag == HC_STATUS_IN_PROGRESS) {
-            std::string output(nomResult.reading, nomResult.reading_len);
+            std::string output(reinterpret_cast<const char*>(nomResult.reading), nomResult.reading_len);
             state.lastCommitTrailingChars = 0;
             state.hasActivePreedit = !output.empty();
             if (nomResult.candidate_count > 0 && nomResult.candidates != nullptr) {
@@ -1001,12 +995,13 @@ private:
                 candidateList->setLabels({"1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9."});
                 candidateList->setPageSize(9);
                 candidateList->setLayoutHint(CandidateLayoutHint::NotSet);
-                std::string readingStr(nomResult.reading, nomResult.reading_len);
+                std::string readingStr(reinterpret_cast<const char*>(nomResult.reading), nomResult.reading_len);
 
                 for (uint16_t i = 0; i < nomResult.candidate_count; ++i) {
-                    std::string candStr(reinterpret_cast<const char*>(nomResult.candidates[i].utf8), nomResult.candidates[i].byte_len);
+                    std::string candStr(reinterpret_cast<const char*>(nomResult.candidates[i].text), nomResult.candidates[i].text_len);
                     Text wordText(candStr);
-                    Text commentText(!readingStr.empty() ? readingStr : "");
+                    std::string candidateReading(reinterpret_cast<const char*>(nomResult.candidates[i].reading), nomResult.candidates[i].reading_len);
+                    Text commentText(!candidateReading.empty() ? candidateReading : readingStr);
                     candidateList->append<HcNomCandidateWord>(wordText, commentText, i, this);
                 }
                 ic->inputPanel().setCandidateList(std::move(candidateList));
@@ -1055,6 +1050,10 @@ private:
         toggleActions_[1] = addToggleAction("Auto restore", HcImeMenuItem::AutoRestore, "Toggle raw-keystroke restore");
         toggleActions_[2] = addToggleAction("Underline", HcImeMenuItem::DisplayUnderline, "Toggle preedit underline");
         toggleActions_[3] = addToggleAction("Quick consonants", HcImeMenuItem::QuickConsonants, "Toggle quick consonant expansion");
+        toggleActions_[4] = addToggleAction("Phrase prediction", HcImeMenuItem::PhrasePrediction, "Toggle Hán Nôm phrase predictions");
+        toggleActions_[5] = addToggleAction("Learn phrase ranking", HcImeMenuItem::LearnPhraseRanking, "Toggle local Hán Nôm phrase learning");
+        resetLearningAction_ = addToggleAction("Reset Hán Nôm learning", HcImeMenuItem::ResetHanNomLearning, "Clear only local Hán Nôm phrase ranking");
+        resetLearningAction_->setCheckable(false);
         refreshStatusMenu();
     }
 
@@ -1077,6 +1076,9 @@ private:
         registerStatusAction("hcime-toggle-auto-restore", toggleActions_[1].get());
         registerStatusAction("hcime-toggle-preedit-underline", toggleActions_[2].get());
         registerStatusAction("hcime-toggle-quick-consonants", toggleActions_[3].get());
+        registerStatusAction("hcime-toggle-hannom-phrase-prediction", toggleActions_[4].get());
+        registerStatusAction("hcime-toggle-hannom-learning", toggleActions_[5].get());
+        registerStatusAction("hcime-reset-hannom-learning", resetLearningAction_.get());
     }
 
     void unregisterStatusActions() {
@@ -1096,6 +1098,8 @@ private:
         toggleActions_[1]->setChecked(*config_.behavior->autoRestore);
         toggleActions_[2]->setChecked(*config_.behavior->displayUnderline);
         toggleActions_[3]->setChecked(*config_.behavior->quickConsonants);
+        toggleActions_[4]->setChecked(*config_.behavior->phrasePrediction);
+        toggleActions_[5]->setChecked(*config_.behavior->learnPhraseRanking);
     }
 
     void attachStatusMenu(InputContext* ic) {
@@ -1109,6 +1113,7 @@ private:
         statusArea.addAction(StatusGroup::InputMethod, modeActions_[5].get());
         statusArea.addAction(StatusGroup::InputMethod, separatorAction_.get());
         for (const auto& action : toggleActions_) statusArea.addAction(StatusGroup::InputMethod, action.get());
+        statusArea.addAction(StatusGroup::InputMethod, resetLearningAction_.get());
         ic->updateUserInterface(UserInterfaceComponent::StatusArea, true);
     }
 
@@ -1126,6 +1131,11 @@ private:
             case HcImeMenuItem::AutoRestore: *behaviorConfig->autoRestore.mutableValue() = !*behaviorConfig->autoRestore; break;
             case HcImeMenuItem::DisplayUnderline: *behaviorConfig->displayUnderline.mutableValue() = !*behaviorConfig->displayUnderline; break;
             case HcImeMenuItem::QuickConsonants: *behaviorConfig->quickConsonants.mutableValue() = !*behaviorConfig->quickConsonants; break;
+            case HcImeMenuItem::PhrasePrediction: *behaviorConfig->phrasePrediction.mutableValue() = !*behaviorConfig->phrasePrediction; break;
+            case HcImeMenuItem::LearnPhraseRanking: *behaviorConfig->learnPhraseRanking.mutableValue() = !*behaviorConfig->learnPhraseRanking; break;
+            case HcImeMenuItem::ResetHanNomLearning:
+                for (auto& [_, state] : contexts_) if (state.session.ptr != nullptr) hc_session_reset_hannom_learning(state.session.ptr);
+                break;
         }
         applyRuntimeConfig();
         refreshStatusMenu();
@@ -1208,7 +1218,8 @@ private:
     HcImeConfig config_;
     std::array<std::unique_ptr<SimpleAction>, 6> modeActions_;
     std::unique_ptr<SimpleAction> separatorAction_;
-    std::array<std::unique_ptr<SimpleAction>, 4> toggleActions_;
+    std::array<std::unique_ptr<SimpleAction>, 6> toggleActions_;
+    std::unique_ptr<SimpleAction> resetLearningAction_;
     std::vector<Connection> actionConnections_;
     std::vector<Action*> registeredActions_;
 };

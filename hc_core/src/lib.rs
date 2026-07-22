@@ -19,10 +19,12 @@ mod tests;
 pub use types::*;
 
 use language::is_known_english_word;
-use session::{render_raw_input, vni_digit_transforms_buffer, Session};
+use session::{render_raw_input, vni_digit_transforms_buffer, NomTextCandidate, Session};
 use transform::{apply_circumflex, apply_telex_w, apply_tone_to_word};
 
-use crate::han_nom::get_global_dict;
+use crate::han_nom::{
+    get_global_dict, get_global_phrase_dict, normalize_phrase_reading, PhraseHistory,
+};
 use vowel::strip_all_marks;
 
 thread_local! {
@@ -30,6 +32,324 @@ thread_local! {
 }
 
 impl Session {
+    fn set_hannom_options(&mut self, options: &HC_HanNomOptions) {
+        self.phrase_prediction_enabled = options.phrase_prediction != 0;
+        self.phrase_learning_enabled = options.learning_enabled != 0;
+        if !options.history_path.is_null() {
+            if let Some(path) = key_text(options.history_path) {
+                if !path.is_empty() {
+                    self.phrase_history_path = std::path::PathBuf::from(path);
+                }
+            }
+        }
+        self.phrase_history = PhraseHistory::load(&self.phrase_history_path);
+    }
+
+    fn phrase_reading(&self) -> String {
+        match &self.phrase_first {
+            Some(first) if self.buffer.is_empty() => format!("{first} "),
+            Some(first) => format!("{first} {}", self.buffer),
+            None => self.buffer.clone(),
+        }
+    }
+
+    fn rebuild_phrase_candidates(&mut self) {
+        self.phrase_candidates.clear();
+        let Ok(chars) = get_global_dict() else {
+            return;
+        };
+        let full = self.phrase_reading();
+        if self.phrase_first.is_none() {
+            for (rank, ch) in chars.lookup(&self.buffer).into_iter().enumerate() {
+                self.phrase_candidates.push(NomTextCandidate {
+                    text: ch.to_string(),
+                    reading: self.buffer.clone(),
+                    kind: 3,
+                    system_rank: rank as u32,
+                });
+            }
+            return;
+        }
+        let Ok(phrases) = get_global_phrase_dict() else {
+            return;
+        };
+        let normalized = normalize_phrase_reading(&full);
+        let exact = !self.buffer.is_empty();
+        let entries = if exact {
+            phrases.exact(&normalized)
+        } else if self.phrase_prediction_enabled {
+            phrases.prefix(&normalized)
+        } else {
+            Vec::new()
+        };
+        for entry in entries {
+            self.phrase_candidates.push(NomTextCandidate {
+                text: entry.glyphs,
+                reading: entry.reading,
+                kind: if exact { 0 } else { 1 },
+                system_rank: entry.system_rank,
+            });
+        }
+        if exact && self.phrase_candidates.is_empty() {
+            let first = self.phrase_first.as_deref().unwrap_or_default();
+            let left = chars.lookup(first);
+            let right = chars.lookup(&self.buffer);
+            for (li, l) in left.into_iter().take(3).enumerate() {
+                for (ri, r) in right.iter().take(3).enumerate() {
+                    self.phrase_candidates.push(NomTextCandidate {
+                        text: format!("{l}{r}"),
+                        reading: normalized.clone(),
+                        kind: 2,
+                        system_rank: (li * 3 + ri) as u32,
+                    });
+                }
+            }
+        }
+        self.phrase_candidates.sort_by(|left, right| {
+            let class = left.kind.cmp(&right.kind);
+            if class != std::cmp::Ordering::Equal {
+                return class;
+            }
+            let (lc, lt) = if self.phrase_learning_enabled {
+                self.phrase_history.score(&left.reading, &left.text)
+            } else {
+                (0, 0)
+            };
+            let (rc, rt) = if self.phrase_learning_enabled {
+                self.phrase_history.score(&right.reading, &right.text)
+            } else {
+                (0, 0)
+            };
+            rc.cmp(&lc)
+                .then_with(|| rt.cmp(&lt))
+                .then_with(|| left.system_rank.cmp(&right.system_rank))
+                .then_with(|| left.text.cmp(&right.text))
+        });
+        self.phrase_candidates
+            .dedup_by(|left, right| left.text == right.text);
+        if self.phrase_candidate_page * 9 >= self.phrase_candidates.len() {
+            self.phrase_candidate_page = 0;
+        }
+    }
+
+    fn populate_nom_result_v2(&mut self, result: &mut HC_HanNomResultV2, handled: u8) {
+        self.rebuild_phrase_candidates();
+        self.reading_buffer = self.phrase_reading();
+        result.status_flag = HCStatusFlag::InProgress as i32;
+        result.error_code = HCErrorCode::None as i32;
+        result.reading = self.reading_buffer.as_ptr();
+        result.reading_len = self.reading_buffer.len().min(u16::MAX as usize) as u16;
+        result.handled = handled;
+        let start = self.phrase_candidate_page * 9;
+        let end = (start + 9).min(self.phrase_candidates.len());
+        self.ffi_phrase_candidates_buf.clear();
+        for candidate in &self.phrase_candidates[start..end] {
+            self.ffi_phrase_candidates_buf.push(HC_HanNomCandidateText {
+                text: candidate.text.as_ptr(),
+                text_len: candidate.text.len().min(u16::MAX as usize) as u16,
+                reading: candidate.reading.as_ptr(),
+                reading_len: candidate.reading.len().min(u16::MAX as usize) as u16,
+                kind: candidate.kind,
+            });
+        }
+        result.candidates = if self.ffi_phrase_candidates_buf.is_empty() {
+            ptr::null()
+        } else {
+            self.ffi_phrase_candidates_buf.as_ptr()
+        };
+        result.candidate_count = self.ffi_phrase_candidates_buf.len() as u16;
+    }
+
+    fn commit_phrase_text(
+        &mut self,
+        text: String,
+        _reading: String,
+        result: &mut HC_HanNomResultV2,
+    ) {
+        self.ffi_v2_output = text;
+        result.status_flag = HCStatusFlag::Commit as i32;
+        result.error_code = HCErrorCode::None as i32;
+        result.reading = self.ffi_v2_output.as_ptr();
+        result.reading_len = self.ffi_v2_output.len().min(u16::MAX as usize) as u16;
+        result.candidates = ptr::null();
+        result.candidate_count = 0;
+        result.handled = 1;
+        self.reset();
+    }
+
+    fn record_phrase_selection(&mut self, reading: &str, glyphs: &str) {
+        if self.phrase_learning_enabled && !reading.is_empty() {
+            self.phrase_history.record(reading, glyphs);
+            self.phrase_history_dirty = true;
+        }
+    }
+
+    fn flush_hannom_learning(&mut self) {
+        if self.phrase_history_dirty
+            && self.phrase_learning_enabled
+            && self
+                .phrase_history
+                .persist(&self.phrase_history_path)
+                .is_ok()
+        {
+            self.phrase_history_dirty = false;
+        }
+    }
+
+    fn handle_han_nom_key_v2(
+        &mut self,
+        request: &HC_KeyRequest,
+        result: &mut HC_HanNomResultV2,
+    ) -> i32 {
+        self.ffi_v2_output.clear();
+        *result = HC_HanNomResultV2 {
+            status_flag: HCStatusFlag::InProgress as i32,
+            error_code: HCErrorCode::None as i32,
+            reading: ptr::null(),
+            reading_len: 0,
+            candidates: ptr::null(),
+            candidate_count: 0,
+            handled: 0,
+        };
+        self.mode = match InputMode::try_from(request.input_mode) {
+            Ok(value) => value,
+            Err(_) => {
+                result.error_code = HCErrorCode::InvalidInputMode as i32;
+                return 0;
+            }
+        };
+        let Some(kind) = key_kind(request.kind) else {
+            return 0;
+        };
+        let text = key_text(request.text).unwrap_or("");
+        match kind {
+            HCKeyKind::Escape => {
+                if self.phrase_first.is_some() && self.buffer.is_empty() {
+                    self.phrase_first = None;
+                    self.phrase_candidate_page = 0;
+                } else {
+                    self.reset();
+                }
+                self.populate_nom_result_v2(result, 1);
+                1
+            }
+            HCKeyKind::Backspace => {
+                self.phrase_candidate_page = 0;
+                if self.raw_buffer.is_empty() && self.phrase_first.is_some() {
+                    self.buffer = self.phrase_first.take().unwrap_or_default();
+                    self.raw_buffer = self.buffer.clone();
+                    self.rendered_raw_len = self.raw_buffer.len();
+                } else if !self.raw_buffer.is_empty() {
+                    self.raw_buffer.pop();
+                    self.render_from_raw();
+                }
+                self.populate_nom_result_v2(result, 1);
+                1
+            }
+            HCKeyKind::Space => {
+                if self.buffer.is_empty() && self.phrase_first.is_none() {
+                    return 0;
+                }
+                if self.phrase_first.is_none() {
+                    self.phrase_first = Some(normalize_phrase_reading(&self.buffer));
+                    self.phrase_candidate_page = 0;
+                    self.buffer.clear();
+                    self.raw_buffer.clear();
+                    self.rendered_raw_len = 0;
+                    self.populate_nom_result_v2(result, 1);
+                    return 1;
+                }
+                self.rebuild_phrase_candidates();
+                let reading = normalize_phrase_reading(&self.phrase_reading());
+                let output = self
+                    .phrase_candidates
+                    .first()
+                    .map(|candidate| candidate.text.clone())
+                    .unwrap_or_else(|| reading.clone());
+                if !self.phrase_candidates.is_empty() {
+                    self.record_phrase_selection(&reading, &output);
+                }
+                self.commit_phrase_text(format!("{output} "), reading, result);
+                1
+            }
+            HCKeyKind::Enter => {
+                if self.buffer.is_empty() && self.phrase_first.is_none() {
+                    return 0;
+                }
+                let raw = normalize_phrase_reading(&self.phrase_reading());
+                self.commit_phrase_text(raw.clone(), String::new(), result);
+                1
+            }
+            HCKeyKind::Printable => {
+                let ch = text.chars().next().unwrap_or('\0');
+                if matches!(ch, '=' | ']' | '+') {
+                    self.rebuild_phrase_candidates();
+                    if (self.phrase_candidate_page + 1) * 9 < self.phrase_candidates.len() {
+                        self.phrase_candidate_page += 1;
+                    }
+                    self.populate_nom_result_v2(result, 1);
+                    return 1;
+                }
+                if matches!(ch, '-' | '[') {
+                    self.phrase_candidate_page = self.phrase_candidate_page.saturating_sub(1);
+                    self.populate_nom_result_v2(result, 1);
+                    return 1;
+                }
+                self.phrase_candidate_page = 0;
+                if is_nom_punctuation(ch) && self.phrase_first.is_some() {
+                    self.rebuild_phrase_candidates();
+                    let reading = normalize_phrase_reading(&self.phrase_reading());
+                    let output = self
+                        .phrase_candidates
+                        .first()
+                        .map(|candidate| candidate.text.clone())
+                        .unwrap_or(reading.clone());
+                    if !self.phrase_candidates.is_empty() {
+                        self.record_phrase_selection(&reading, &output);
+                    }
+                    self.commit_phrase_text(format!("{output}{ch}"), reading, result);
+                    return 1;
+                }
+                if matches!(self.mode, InputMode::HanNomVni | InputMode::Vni) && ch.is_ascii_digit()
+                {
+                    if self.raw_buffer.is_empty() {
+                        result.handled = 0;
+                        return 0;
+                    }
+                    compose::TypingEngine::apply_vni_trigger(
+                        &mut self.buffer,
+                        ch,
+                        self.legacy_tone,
+                    );
+                    self.raw_buffer.push(ch);
+                    self.populate_nom_result_v2(result, 1);
+                    return 1;
+                }
+                if ch.is_ascii_digit() {
+                    result.handled = 0;
+                    return 0;
+                }
+                if self.raw_buffer.len() < 64 {
+                    self.raw_buffer.push_str(text);
+                    self.render_from_raw();
+                }
+                self.populate_nom_result_v2(result, 1);
+                1
+            }
+            _ => 0,
+        }
+    }
+
+    fn select_han_nom_candidate_v2(&mut self, index: usize, result: &mut HC_HanNomResultV2) -> i32 {
+        self.rebuild_phrase_candidates();
+        let index = self.phrase_candidate_page * 9 + index;
+        let Some(candidate) = self.phrase_candidates.get(index).cloned() else {
+            return 0;
+        };
+        self.record_phrase_selection(&candidate.reading, &candidate.text);
+        self.commit_phrase_text(candidate.text, candidate.reading, result);
+        1
+    }
     fn handle_key(&mut self, request: &HC_KeyRequest) -> HC_KeyResult {
         self.mode = match InputMode::try_from(request.input_mode) {
             Ok(mode) => mode,
@@ -670,7 +990,9 @@ pub extern "C" fn hc_session_free(session: *mut std::ffi::c_void) {
         return;
     }
     unsafe {
-        drop(Box::from_raw(session as *mut Session));
+        let mut session = Box::from_raw(session as *mut Session);
+        session.flush_hannom_learning();
+        drop(session);
     }
 }
 
@@ -1077,6 +1399,70 @@ pub extern "C" fn hc_session_handle_key_hannom(
     unsafe {
         let session = &mut *(session as *mut Session);
         session.handle_han_nom_key(&*request, &mut *result)
+    }
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn hc_session_handle_key_hannom_v2(
+    session: *mut std::ffi::c_void,
+    request: *const HC_KeyRequest,
+    result: *mut HC_HanNomResultV2,
+) -> i32 {
+    if session.is_null() || request.is_null() || result.is_null() {
+        return 0;
+    }
+    unsafe { (&mut *(session as *mut Session)).handle_han_nom_key_v2(&*request, &mut *result) }
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn hc_session_select_hannom_candidate_v2(
+    session: *mut std::ffi::c_void,
+    index: u16,
+    result: *mut HC_HanNomResultV2,
+) -> i32 {
+    if session.is_null() || result.is_null() {
+        return 0;
+    }
+    unsafe {
+        (&mut *(session as *mut Session)).select_han_nom_candidate_v2(index as usize, &mut *result)
+    }
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn hc_session_set_hannom_options(
+    session: *mut std::ffi::c_void,
+    options: *const HC_HanNomOptions,
+) {
+    if session.is_null() || options.is_null() {
+        return;
+    }
+    unsafe {
+        (&mut *(session as *mut Session)).set_hannom_options(&*options);
+    }
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn hc_session_reset_hannom_learning(session: *mut std::ffi::c_void) {
+    if session.is_null() {
+        return;
+    }
+    unsafe {
+        let session = &mut *(session as *mut Session);
+        session.phrase_history.reset(&session.phrase_history_path);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn hc_session_flush_hannom_learning(session: *mut std::ffi::c_void) {
+    if session.is_null() {
+        return;
+    }
+    unsafe {
+        (&mut *(session as *mut Session)).flush_hannom_learning();
     }
 }
 

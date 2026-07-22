@@ -6,9 +6,11 @@ find_program(CARGO_EXECUTABLE cargo REQUIRED)
 set(HC_CORE_MANIFEST ${CMAKE_CURRENT_SOURCE_DIR}/../hc_core/Cargo.toml)
 set(HC_CORE_TARGET_DIR ${CMAKE_CURRENT_BINARY_DIR}/cargo-target)
 set(HC_CORE_SHARED ${HC_CORE_TARGET_DIR}/release/libhc_core.so)
-set(HC_CORE_RUST_SOURCES
+file(GLOB HC_CORE_RUST_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/../hc_core/Cargo.toml
-    ${CMAKE_CURRENT_SOURCE_DIR}/../hc_core/src/lib.rs
+    ${CMAKE_CURRENT_SOURCE_DIR}/../hc_core/Cargo.lock
+    ${CMAKE_CURRENT_SOURCE_DIR}/../hc_core/src/*.rs
+    ${CMAKE_CURRENT_SOURCE_DIR}/../hc_core/data/*.bin
 )
 
 add_custom_command(

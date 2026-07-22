@@ -1,105 +1,116 @@
 # HC_IME
 
-HC_IME là bộ gõ tiếng Việt ưu tiên Linux, tích hợp trực tiếp với Fcitx5. Dự án
-kết hợp lõi soạn thảo bằng Rust với addon C++ mỏng để mang trải nghiệm gõ tiếng
-Việt và Hán Nôm vào các ứng dụng máy tính để bàn.
+HC_IME is a Linux-first Vietnamese input method for Fcitx5. It combines a Rust
+composition engine with a thin C++ addon, providing Vietnamese and Hán Nôm
+input through Fcitx5's native desktop runtime.
 
-Trạng thái đã được kiểm chứng của mã nguồn nằm tại
-[docs/STATUS.md](docs/STATUS.md).
+For the current validated snapshot, see [docs/STATUS.md](docs/STATUS.md).
 
-## Tính năng
+## Features
 
-- Gõ tiếng Việt theo Telex, VNI và VIQR.
-- Soạn thảo Hán Nôm theo Telex, VNI và VIQR, với từ điển nhúng đa nguồn.
-- Hiển thị ứng viên Hán Nôm ngay khi đang gõ âm đọc.
-- Khôi phục chuỗi gõ thô, hoàn tác/chuyển đổi lại và kiểm tra chính tả tiếng
-  Việt.
-- Tra cứu từ điển tiếng Việt và tiếng Anh tùy chọn.
-- Mở rộng phụ âm nhanh, bảo vệ từ tiếng Anh ba mức, macro và phím `Esc` để
-  khôi phục chuỗi gõ thô.
-- Cấu hình riêng theo ứng dụng, ghi nhớ chế độ Việt/Anh và lựa chọn đầu ra
-  preedit hoặc surrounding-text.
-- Bảng cấu hình gốc và các hành động trạng thái của Fcitx5.
+- Vietnamese input with Telex, VNI, and VIQR.
+- Hán Nôm input with Telex, VNI, and VIQR readings.
+- Live character and two-word phrase candidates while composing a reading.
+- Local phrase-ranking learning, with a reset control and no network service.
+- Raw-keystroke recovery, undo/reconversion, and Vietnamese spell checking.
+- Optional Vietnamese and English dictionaries.
+- Quick consonant expansion, three-level English protection, macros, and raw
+  keystroke restore with `Esc`.
+- Per-application behavior, smart Vietnamese/English mode switching, and
+  preedit or surrounding-text output.
+- Native Fcitx5 configuration and status-area actions.
 
-## Cách hoạt động
+## Architecture
 
 ```mermaid
 graph TD
-    U[Người dùng gõ trong ứng dụng] --> F[Fcitx5]
-    F --> A[Addon HC_IME C++]
-    A -->|C FFI| R[Lõi HC_IME Rust]
-    R --> V[Soạn thảo Telex / VNI / VIQR]
-    R --> H[Tra cứu và chọn Hán Nôm]
-    R --> D[Kiểm tra chính tả, từ điển, macro]
-    V --> O[Preedit hoặc văn bản được cam kết]
+    U[User types in an application] --> F[Fcitx5]
+    F --> A[HC_IME C++ addon]
+    A -->|C FFI| R[HC_IME Rust core]
+    R --> V[Telex / VNI / VIQR composition]
+    R --> H[Hán Nôm characters and phrases]
+    R --> D[Spell check, dictionaries, and macros]
+    V --> O[Preedit or committed text]
     H --> O
     D --> O
     O --> F
 ```
 
-1. Fcitx5 gửi phím bấm cho addon HC_IME.
-2. Addon chuyển phím và cấu hình hiện thời sang lõi Rust qua C FFI.
-3. Lõi áp dụng quy tắc gõ, từ điển và trạng thái phiên, rồi trả về preedit,
-   danh sách ứng viên hoặc văn bản cần cam kết.
-4. Addon cập nhật giao diện Fcitx5 hoặc chèn văn bản qua surrounding-text,
-   tùy khả năng của ứng dụng và cấu hình đã chọn.
+1. Fcitx5 sends key events to the HC_IME addon.
+2. The addon passes keys and active configuration to the Rust session through
+   C FFI.
+3. The Rust core applies composition rules and dictionary lookup, then returns
+   preedit text, candidates, or committed text.
+4. The addon updates Fcitx5's input panel, or applies surrounding-text output
+   when that mode is available and selected.
 
-## Gõ tiếng Việt
+## Vietnamese Input
 
-Ba chế độ tiếng Việt thông thường là `Telex`, `VNI` và `VIQR`. Lõi xử lý dấu,
-biến đổi dấu mũ/dấu râu, hoàn tác và các chuỗi không hợp lệ. Khi bật kiểm tra
-chính tả, HC_IME có thể dùng quy tắc âm tiết cùng các từ điển ngoài để phân biệt
-từ tiếng Việt và tiếng Anh.
+Choose `Telex`, `VNI`, or `VIQR`. The core handles tone and shape transforms,
+invalid-sequence recovery, and raw-input replay. When spell checking is
+enabled, it combines Vietnamese syllable rules with optional dictionaries to
+avoid applying Vietnamese transforms to English text.
 
-Các tùy chọn đáng chú ý:
+Notable settings include:
 
-- `Quick consonants`: mở rộng nhanh như `cc` → `ch`, `nn` → `ng`, `f` → `ph`.
-- `English protection`: bảo vệ tiếng Anh theo mức `Off`, `Soft` hoặc `Hard`.
-- `Macro file path`: nạp macro theo định dạng `phím=từ thay thế`.
-- `ESC restores raw keystrokes`: trả lại chuỗi phím ban đầu khi đang soạn.
+- `Quick consonants`: expansions such as `cc` → `ch`, `nn` → `ng`, and
+  `f` → `ph`.
+- `English protection`: `Off`, `Soft`, or `Hard` protection for English words.
+- `Macro file path`: macros in `key=replacement` format.
+- `ESC restores raw keystrokes`: restores the original keys during composition.
 
-## Gõ Hán Nôm
+## Hán Nôm Input
 
-Chọn `Hán Nôm (Telex)`, `Hán Nôm (VNI)` hoặc `Hán Nôm (VIQR)` trong HC_IME.
-Gõ âm đọc như bình thường; danh sách chữ Hán Nôm phù hợp sẽ xuất hiện ngay bên
-dưới preedit. Mỗi ứng viên có nhãn `1.` đến `9.` và phần chú thích là âm đọc
-hiện tại.
+Choose `Hán Nôm (Telex)`, `Hán Nôm (VNI)`, or `Hán Nôm (VIQR)`. As you type a
+Vietnamese reading, HC_IME shows matching Hán Nôm candidates with labels
+`1.`–`9.`. Candidate comments show the full Vietnamese reading.
 
-| Thao tác | Kết quả |
+HC_IME also predicts common two-word phrases. After typing the first reading,
+press `Space` once to start the second reading and show phrase typeahead.
+After typing the second reading, exact phrase candidates are ranked before
+generated two-character fallbacks. Phrase prediction and local ranking learning
+can each be turned off in the Fcitx5 configuration or status area.
+
+| Key or action | Result |
 | --- | --- |
-| `1`–`9` | Chọn ứng viên tương ứng trên trang hiện tại. |
-| `Space` | Chọn ứng viên đầu tiên. |
-| `Enter` khi chưa bôi chọn | Cam kết nguyên âm đọc Quốc ngữ. |
-| `Enter` khi đã bôi chọn | Cam kết chữ Hán Nôm đang bôi chọn. |
-| `↑` `↓` `←` `→`, `Tab`, `Shift+Tab` | Di chuyển vùng bôi chọn. |
-| `PageUp` / `PageDown`, `-` / `=`, `[` / `]` | Chuyển trang ứng viên. |
-| Dấu câu ASCII | Cam kết ứng viên đầu tiên rồi chèn dấu câu. |
-| `Esc` | Quay lại pha gõ âm đọc khi đang duyệt ứng viên. |
+| `1`–`9` | Commit the corresponding candidate on the current page. |
+| `Space` after the first reading | Start phrase composition and show phrase predictions. |
+| `Space` during phrase composition | Commit the top phrase candidate followed by a literal space. |
+| `Enter` with no focused candidate | Commit the raw Quốc ngữ reading. |
+| `Enter` with a focused candidate | Commit the focused Hán Nôm character or phrase. |
+| Arrow keys, `Tab`, `Shift+Tab` | Move the candidate focus. |
+| `PageUp` / `PageDown`, `-` / `=`, `[` / `]` | Change candidate pages. |
+| ASCII punctuation | Commit the top candidate followed by the punctuation. |
+| `Esc` / `Backspace` | Step back through phrase composition or editing. |
 
-Từ điển Hán Nôm nhúng được tạo từ Unihan, NomStandardization, cake_gao và
-pearapple123. Bản hiện tại chứa 7.114 âm đọc và 19.134 ký tự, trong đó có
-14.297 ký tự Nôm thuộc Extension B trở lên.
+The embedded character dictionary is built from Unihan, NomStandardization,
+cake_gao, and pearapple123. The phrase dictionary contains 409 validated
+two-word entries. Local ranking data contains only the normalized reading, the
+selected glyph phrase, a selection count, and a timestamp; it is bounded to
+2,048 entries and can be reset from the status area.
 
-## Cấu hình Fcitx5
+## Fcitx5 Configuration
 
-Mở công cụ cấu hình Fcitx5:
+Open the native configuration tool:
 
 ```bash
 fcitx5-configtool
 ```
 
-Mục HC_IME có các nhóm cấu hình cho chế độ gõ, hành vi, đường dẫn từ điển, quy
-tắc theo ứng dụng và cách xuất văn bản. Các hành động chuyển chế độ và bật/tắt
-một số tùy chọn cũng xuất hiện ở vùng trạng thái Fcitx5; có thể gán phím tắt
-cho chúng bằng `fcitx5-configtool`.
+HC_IME provides settings for input modes, typing behavior, phrase prediction
+and learning, dictionary paths, per-application rules, and output mode. The
+status area also exposes mode switches plus toggles for spell checking,
+auto-restore, underline, quick consonants, phrase prediction, phrase learning,
+and reset of local Hán Nôm learning.
 
-Để giữ Bamboo cài đặt song song nhưng dùng HC_IME mặc định, đặt `hcime` làm
-phương thức nhập mặc định trong profile Fcitx5 và giữ `bamboo` trong cùng nhóm
-phương thức nhập.
+To keep Bamboo installed while making HC_IME the default Vietnamese input
+method, set `hcime` as the default in the Fcitx5 profile and leave `bamboo` in
+the same input-method group.
 
-## Cài đặt và biên dịch
+## Build and Install
 
-Yêu cầu: Rust/Cargo, CMake, Ninja, Fcitx5 và gói phát triển Fcitx5.
+Requirements: Rust/Cargo, CMake, Ninja, Fcitx5, and the Fcitx5 development
+packages.
 
 ```bash
 cargo test --manifest-path hc_core/Cargo.toml
@@ -109,7 +120,7 @@ sudo cmake --install build
 fcitx5 -r
 ```
 
-Cài đặt vào thư mục người dùng, không ghi vào `/usr`:
+For a user-local installation that does not write to `/usr`:
 
 ```bash
 cmake -S . -B build-user -G Ninja -DCMAKE_INSTALL_PREFIX="$HOME/.local"
@@ -118,30 +129,24 @@ cmake --install build-user
 fcitx5 -r
 ```
 
-## Kiểm chứng
+## Validation
 
-Chạy cổng kiểm thử đầu-cuối của dự án:
+Run the repository's end-to-end smoke gate:
 
 ```bash
 scripts/e2e-smoke.sh
 ```
 
-Script này kiểm tra định dạng Rust, chạy kiểm thử và Clippy, biên dịch addon,
-chạy bridge probe Fcitx5, cài đặt vào vùng tạm, rồi xác minh metadata, liên kết
-thư viện và các ABI Rust cần thiết.
+The gate checks Rust formatting, deterministically regenerates both embedded
+Hán Nôm dictionaries, runs Rust tests and Clippy, builds the addon, runs the
+Fcitx5 bridge probe, stages installation, and verifies metadata, linkage, and
+the exported Rust ABI.
 
-Để kiểm tra bố cục cài đặt vào một thư mục tạm riêng:
+## Repository Layout
 
-```bash
-cmake -S . -B build -G Ninja
-cmake --build build
-cmake --install build --prefix /tmp/hcime-install-smoke
-```
-
-## Cấu trúc mã nguồn
-
-- `hc_core/`: lõi Rust, trạng thái phiên, từ điển Hán Nôm và C ABI.
-- `linux_fcitx5/`: addon Fcitx5, metadata, cấu hình và quy tắc cài đặt.
-- `scripts/`: công cụ kiểm chứng cục bộ và bộ dựng từ điển Hán Nôm.
-- `docs/`: tài liệu dự án; `docs/STATUS.md` là nguồn sự thật cục bộ.
-- `CMakeLists.txt`: điểm vào cho bản dựng CMake.
+- `hc_core/`: Rust engine, session state, embedded dictionaries, and C ABI.
+- `linux_fcitx5/`: Fcitx5 addon, metadata, configuration, and install rules.
+- `scripts/`: validation helpers and the Hán Nôm dictionary builder.
+- `docs/`: project documentation; `docs/STATUS.md` is the local source of
+  truth.
+- `CMakeLists.txt`: top-level CMake entry point.

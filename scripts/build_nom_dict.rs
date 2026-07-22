@@ -9,6 +9,17 @@ pub struct DictEntry {
     pub candidates: Vec<char>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PhraseEntry {
+    reading: String,
+    glyphs: String,
+    system_rank: u32,
+}
+
+fn normalize_phrase_reading(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
 fn parse_unihan(path: &Path) -> Result<HashMap<String, Vec<char>>, Box<dyn std::error::Error>> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
@@ -43,7 +54,6 @@ fn parse_unihan(path: &Path) -> Result<HashMap<String, Vec<char>>, Box<dyn std::
 struct NomStdRow {
     reading: String,
     chunom: String,
-    eng: String,
 }
 
 fn parse_nom_standardization(
@@ -63,8 +73,6 @@ fn parse_nom_standardization(
         if parts.len() >= 4 {
             let qnc = parts[2].trim();
             let chunom = parts[3].trim();
-            let eng = if parts.len() >= 5 { parts[4].trim() } else { "" };
-
             if chunom.is_empty() || chunom == "？" || chunom.contains('？') {
                 skipped_empty_count += 1;
                 continue;
@@ -76,7 +84,6 @@ fn parse_nom_standardization(
                     rows.push(NomStdRow {
                         reading,
                         chunom: chunom.to_string(),
-                        eng: eng.to_string(),
                     });
                 }
             }
@@ -124,6 +131,61 @@ fn parse_rime_dict(path: &Path) -> Result<HashMap<String, Vec<char>>, Box<dyn st
     Ok(map)
 }
 
+/// Reads the bundled compound section without changing the legacy single-glyph
+/// dictionary. Compound rows must be tab-delimited so accidental prose does not
+/// silently become a prediction.
+fn parse_rime_phrases(path: &Path) -> Result<Vec<PhraseEntry>, Box<dyn std::error::Error>> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut phrases = Vec::new();
+    let mut seen = HashSet::new();
+    let mut in_compounds = false;
+    for (line_no, line) in reader.lines().enumerate() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed == "#Compounds" {
+            in_compounds = true;
+            continue;
+        }
+        if !in_compounds || trimmed.is_empty() || trimmed.starts_with('#') { continue; }
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() != 2 {
+            return Err(format!("malformed compound row {}", line_no + 1).into());
+        }
+        let glyphs = parts[0].trim().to_string();
+        let reading = normalize_phrase_reading(parts[1]);
+        if reading.split(' ').count() != 2 || glyphs.chars().count() < 2 {
+            return Err(format!("invalid two-word compound row {}", line_no + 1).into());
+        }
+        if !seen.insert(reading.clone()) {
+            return Err(format!("duplicate compound reading {reading}").into());
+        }
+        phrases.push(PhraseEntry { reading, glyphs, system_rank: phrases.len() as u32 });
+    }
+    if phrases.len() != 409 { return Err(format!("expected 409 compound phrases, found {}", phrases.len()).into()); }
+    Ok(phrases)
+}
+
+fn serialize_phrase_v1(phrases: &[PhraseEntry], out_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = out_path.parent() { fs::create_dir_all(parent)?; }
+    let mut file = File::create(out_path)?;
+    file.write_all(b"HNPH")?;
+    file.write_all(&[0x01, 0, 0, 0])?;
+    file.write_all(&(phrases.len() as u32).to_le_bytes())?;
+    for entry in phrases {
+        let reading = entry.reading.as_bytes();
+        let glyphs = entry.glyphs.as_bytes();
+        if reading.len() > u16::MAX as usize || glyphs.len() > u16::MAX as usize { return Err("phrase too long".into()); }
+        file.write_all(&(reading.len() as u16).to_le_bytes())?;
+        file.write_all(reading)?;
+        file.write_all(&(glyphs.len() as u16).to_le_bytes())?;
+        file.write_all(glyphs)?;
+        file.write_all(&entry.system_rank.to_le_bytes())?;
+    }
+    file.flush()?;
+    Ok(())
+}
+
 fn serialize_v1(
     dict: &HashMap<String, Vec<char>>,
     out_path: &Path,
@@ -145,7 +207,9 @@ fn serialize_v1(
     let count = dict.len() as u32;
     file.write_all(&count.to_le_bytes())?;
 
-    for (reading, candidates) in dict {
+    let mut ordered: Vec<_> = dict.iter().collect();
+    ordered.sort_by(|(left, _), (right, _)| left.cmp(right));
+    for (reading, candidates) in ordered {
         let reading_bytes = reading.as_bytes();
         let r_len = reading_bytes.len() as u8;
         file.write_all(&[r_len])?;
@@ -166,6 +230,13 @@ fn serialize_v1(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Building Hán Nôm Dictionary (v10) ===");
+
+    let mut output_dir = std::env::args().skip(1);
+    let output_dir = match (output_dir.next().as_deref(), output_dir.next()) {
+        (None, None) => Path::new("hc_core/data").to_path_buf(),
+        (Some("--output-dir"), Some(dir)) => Path::new(&dir).to_path_buf(),
+        _ => return Err("usage: build_nom_dict.rs [--output-dir DIR]".into()),
+    };
 
     // 1. Unihan
     let unihan_path = Path::new("data/Unihan_Readings.txt");
@@ -189,7 +260,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 4. pearapple123
     let pear_path = Path::new("data/chu_nom.dict.yaml");
     let pear_map = parse_rime_dict(pear_path)?;
+    let phrases = parse_rime_phrases(pear_path)?;
     println!("pearapple123 loaded: {} unique readings", pear_map.len());
+    println!("pearapple123 compounds loaded: {} two-word phrases", phrases.len());
 
     // Merge into combined dict
     let mut combined: HashMap<String, Vec<char>> = HashMap::new();
@@ -280,16 +353,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Serialize to hc_core/data/han_nom_dict.bin
-    let bin_path = Path::new("hc_core/data/han_nom_dict.bin");
-    serialize_v1(&combined, bin_path)?;
+    let bin_path = output_dir.join("han_nom_dict.bin");
+    serialize_v1(&combined, &bin_path)?;
     println!(
         "Serialized binary dictionary to {:?} (size: {} bytes)",
         bin_path,
-        fs::metadata(bin_path)?.len()
+        fs::metadata(&bin_path)?.len()
     );
+    let phrase_path = output_dir.join("han_nom_phrase_dict.bin");
+    serialize_phrase_v1(&phrases, &phrase_path)?;
+    println!("Serialized phrase dictionary to {:?} ({} entries)", phrase_path, phrases.len());
 
     // Generate quality report
-    let mut report = File::create("quality_report.txt")?;
+    let mut report = File::create(output_dir.join("quality_report.txt"))?;
     writeln!(report, "Hán Nôm Dictionary Quality Report")?;
     writeln!(report, "=================================")?;
     writeln!(report, "Total unique readings: {}", combined.len())?;

@@ -2944,3 +2944,276 @@ fn hannom_punctuation_autocommits_candidate_plus_punct() {
 
     hc_session_free(session);
 }
+
+fn v2_text(result: &HC_HanNomResultV2) -> String {
+    if result.reading.is_null() {
+        return String::new();
+    }
+    unsafe {
+        std::str::from_utf8(std::slice::from_raw_parts(
+            result.reading,
+            result.reading_len as usize,
+        ))
+        .unwrap()
+        .to_owned()
+    }
+}
+
+#[test]
+fn hannom_v2_converts_common_two_word_phrase_and_predicts() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut result: HC_HanNomResultV2 = unsafe { std::mem::zeroed() };
+    for ch in "thành".chars() {
+        let key = c(&ch.to_string());
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = key.as_ptr();
+        assert_eq!(
+            hc_session_handle_key_hannom_v2(session, &req, &mut result),
+            1
+        );
+    }
+    let space = c(" ");
+    req.kind = HCKeyKind::Space as i32;
+    req.text = space.as_ptr();
+    hc_session_handle_key_hannom_v2(session, &req, &mut result);
+    assert!(
+        result.candidate_count > 0,
+        "first word exposes phrase predictions"
+    );
+    for ch in "phố".chars() {
+        let key = c(&ch.to_string());
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = key.as_ptr();
+        hc_session_handle_key_hannom_v2(session, &req, &mut result);
+    }
+    assert!(result.candidate_count > 0);
+    assert_eq!(
+        hc_session_select_hannom_candidate_v2(session, 0, &mut result),
+        1
+    );
+    assert_eq!(v2_text(&result), "城庯");
+    hc_session_free(session);
+}
+
+#[test]
+fn hannom_v2_space_commits_phrase_with_delimiter_and_v1_remains_available() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut result: HC_HanNomResultV2 = unsafe { std::mem::zeroed() };
+    for ch in "đại".chars() {
+        let key = c(&ch.to_string());
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = key.as_ptr();
+        hc_session_handle_key_hannom_v2(session, &req, &mut result);
+    }
+    let space = c(" ");
+    req.kind = HCKeyKind::Space as i32;
+    req.text = space.as_ptr();
+    hc_session_handle_key_hannom_v2(session, &req, &mut result);
+    for ch in "học".chars() {
+        let key = c(&ch.to_string());
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = key.as_ptr();
+        hc_session_handle_key_hannom_v2(session, &req, &mut result);
+    }
+    req.kind = HCKeyKind::Space as i32;
+    hc_session_handle_key_hannom_v2(session, &req, &mut result);
+    assert_eq!(v2_text(&result), "大學 ");
+    let mut v1: HC_HanNomResult = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        hc_session_handle_key_hannom(session, &req, &mut v1),
+        0,
+        "v1 symbol remains callable after v2 commit"
+    );
+    hc_session_free(session);
+}
+
+#[test]
+fn hannom_v2_commit_bytes_survive_handler_return_and_options_accept_null_path() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let options = HC_HanNomOptions {
+        phrase_prediction: 1,
+        learning_enabled: 0,
+        history_path: ptr::null(),
+    };
+    hc_session_set_hannom_options(session, &options);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut result: HC_HanNomResultV2 = unsafe { std::mem::zeroed() };
+    for ch in "Hà".chars() {
+        let key = c(&ch.to_string());
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = key.as_ptr();
+        hc_session_handle_key_hannom_v2(session, &req, &mut result);
+    }
+    let space = c(" ");
+    req.kind = HCKeyKind::Space as i32;
+    req.text = space.as_ptr();
+    hc_session_handle_key_hannom_v2(session, &req, &mut result);
+    for ch in "Nội".chars() {
+        let key = c(&ch.to_string());
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = key.as_ptr();
+        hc_session_handle_key_hannom_v2(session, &req, &mut result);
+    }
+    assert_eq!(
+        hc_session_select_hannom_candidate_v2(session, 0, &mut result),
+        1
+    );
+    let bytes = unsafe { std::slice::from_raw_parts(result.reading, result.reading_len as usize) };
+    assert_eq!(
+        std::str::from_utf8(bytes).unwrap(),
+        "河内",
+        "borrowed UTF-8 remains valid after FFI returns"
+    );
+    hc_session_free(session);
+}
+
+#[test]
+fn hannom_v2_generates_bounded_fallback_and_history_recovers_from_corruption() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut result: HC_HanNomResultV2 = unsafe { std::mem::zeroed() };
+    for ch in "nam".chars() {
+        let key = c(&ch.to_string());
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = key.as_ptr();
+        hc_session_handle_key_hannom_v2(session, &req, &mut result);
+    }
+    let space = c(" ");
+    req.kind = HCKeyKind::Space as i32;
+    req.text = space.as_ptr();
+    hc_session_handle_key_hannom_v2(session, &req, &mut result);
+    for ch in "nam".chars() {
+        let key = c(&ch.to_string());
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = key.as_ptr();
+        hc_session_handle_key_hannom_v2(session, &req, &mut result);
+    }
+    assert!(result.candidate_count <= 9);
+    assert!(result.candidate_count > 0);
+    let kinds =
+        unsafe { std::slice::from_raw_parts(result.candidates, result.candidate_count as usize) };
+    assert!(
+        kinds.iter().all(|candidate| candidate.kind == 2),
+        "unknown phrase uses generated fallback candidates"
+    );
+    hc_session_free(session);
+
+    let temp_dir = std::env::temp_dir().join(format!("hcime-history-{}", std::process::id()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let temp = temp_dir.join("history.json");
+    std::fs::write(&temp, b"not json").unwrap();
+    let mut history = crate::han_nom::PhraseHistory::load(&temp);
+    assert!(history.entries.is_empty());
+    history.record("thành phố", "城庯");
+    history.persist(&temp).unwrap();
+    assert_eq!(
+        crate::han_nom::PhraseHistory::load(&temp)
+            .score("thành phố", "城庯")
+            .0,
+        1
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&temp_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&temp).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    history.reset(&temp);
+    assert!(!temp.exists());
+}
+
+#[test]
+fn hannom_v2_pages_single_glyph_candidates_without_treating_navigation_as_text() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut result: HC_HanNomResultV2 = unsafe { std::mem::zeroed() };
+    for ch in "nhân".chars() {
+        let key = c(&ch.to_string());
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = key.as_ptr();
+        hc_session_handle_key_hannom_v2(session, &req, &mut result);
+    }
+    assert_eq!(result.candidate_count, 9, "test reading has a second page");
+    let first_candidate = unsafe { *result.candidates };
+    let first = unsafe {
+        std::slice::from_raw_parts(first_candidate.text, first_candidate.text_len as usize)
+    }
+    .to_vec();
+    let next = c("=");
+    req.text = next.as_ptr();
+    hc_session_handle_key_hannom_v2(session, &req, &mut result);
+    assert!(result.candidate_count > 0);
+    let second_candidate = unsafe { *result.candidates };
+    let second = unsafe {
+        std::slice::from_raw_parts(second_candidate.text, second_candidate.text_len as usize)
+    };
+    assert_ne!(
+        first.as_slice(),
+        second,
+        "page navigation changes the candidate slice"
+    );
+    let previous = c("-");
+    req.text = previous.as_ptr();
+    hc_session_handle_key_hannom_v2(session, &req, &mut result);
+    let restored_candidate = unsafe { *result.candidates };
+    let restored = unsafe {
+        std::slice::from_raw_parts(
+            restored_candidate.text,
+            restored_candidate.text_len as usize,
+        )
+    };
+    assert_eq!(first.as_slice(), restored);
+    hc_session_free(session);
+}
+
+#[test]
+fn hannom_v2_defers_learning_file_io_until_explicit_flush() {
+    let dir = std::env::temp_dir().join(format!("hcime-deferred-history-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("history.json");
+    let path_c = c(path.to_str().unwrap());
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let options = HC_HanNomOptions {
+        phrase_prediction: 1,
+        learning_enabled: 1,
+        history_path: path_c.as_ptr(),
+    };
+    hc_session_set_hannom_options(session, &options);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut result: HC_HanNomResultV2 = unsafe { std::mem::zeroed() };
+    for ch in "Hà".chars() {
+        let key = c(&ch.to_string());
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = key.as_ptr();
+        hc_session_handle_key_hannom_v2(session, &req, &mut result);
+    }
+    let space = c(" ");
+    req.kind = HCKeyKind::Space as i32;
+    req.text = space.as_ptr();
+    hc_session_handle_key_hannom_v2(session, &req, &mut result);
+    for ch in "Nội".chars() {
+        let key = c(&ch.to_string());
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = key.as_ptr();
+        hc_session_handle_key_hannom_v2(session, &req, &mut result);
+    }
+    assert_eq!(
+        hc_session_select_hannom_candidate_v2(session, 0, &mut result),
+        1
+    );
+    assert!(
+        !path.exists(),
+        "selection updates memory without file I/O in the key path"
+    );
+    hc_session_flush_hannom_learning(session);
+    assert!(path.exists(), "lifecycle flush persists deferred learning");
+    hc_session_free(session);
+}

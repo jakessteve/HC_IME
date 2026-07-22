@@ -2,12 +2,21 @@ use std::collections::HashMap;
 use std::ffi::c_char;
 use std::time::Instant;
 
+use crate::han_nom::{default_history_path, PhraseHistory};
 use crate::language::{is_viqr_trigger, language_scores};
 use crate::quick_consonants;
 use crate::types::{
     CommitDecision, EnglishProtectionLevel, HCSpellCheckStatus, HCStatusFlag, HC_CandidateChar,
-    HC_State, InputMode, NomPhase,
+    HC_HanNomCandidateText, HC_State, InputMode, NomPhase,
 };
+
+#[derive(Debug, Clone)]
+pub struct NomTextCandidate {
+    pub text: String,
+    pub reading: String,
+    pub kind: u8,
+    pub system_rank: u32,
+}
 use crate::vowel::strip_all_marks;
 
 pub const EDIT_TIMEOUT_MS: u128 = 1500;
@@ -27,7 +36,7 @@ pub struct Session {
     pub previous_buffer: String,
     pub previous_raw_buffer: String,
     pub last_spell_check_status: HCSpellCheckStatus,
-    rendered_raw_len: usize,
+    pub rendered_raw_len: usize,
     previous_rendered_raw_len: usize,
     pub macros: HashMap<String, String>,
     pub quick_consonants_enabled: bool,
@@ -41,6 +50,16 @@ pub struct Session {
     pub candidate_page: usize,
     pub reading_buffer: String,
     pub ffi_candidates_buf: Vec<HC_CandidateChar>,
+    pub phrase_first: Option<String>,
+    pub phrase_candidates: Vec<NomTextCandidate>,
+    pub phrase_candidate_page: usize,
+    pub ffi_phrase_candidates_buf: Vec<HC_HanNomCandidateText>,
+    pub ffi_v2_output: String,
+    pub phrase_prediction_enabled: bool,
+    pub phrase_learning_enabled: bool,
+    pub phrase_history_path: std::path::PathBuf,
+    pub phrase_history: PhraseHistory,
+    pub phrase_history_dirty: bool,
 }
 
 impl Session {
@@ -73,6 +92,16 @@ impl Session {
             candidate_page: 0,
             reading_buffer: String::new(),
             ffi_candidates_buf: Vec::new(),
+            phrase_first: None,
+            phrase_candidates: Vec::new(),
+            phrase_candidate_page: 0,
+            ffi_phrase_candidates_buf: Vec::new(),
+            ffi_v2_output: String::new(),
+            phrase_prediction_enabled: true,
+            phrase_learning_enabled: true,
+            phrase_history_path: default_history_path(),
+            phrase_history: PhraseHistory::default(),
+            phrase_history_dirty: false,
         }
     }
 
@@ -94,6 +123,10 @@ impl Session {
         self.candidate_page = 0;
         self.reading_buffer.clear();
         self.ffi_candidates_buf.clear();
+        self.phrase_first = None;
+        self.phrase_candidates.clear();
+        self.phrase_candidate_page = 0;
+        self.ffi_phrase_candidates_buf.clear();
     }
 
     pub fn render_from_raw(&mut self) {

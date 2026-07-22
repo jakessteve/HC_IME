@@ -50,6 +50,9 @@ by the repository's tests or end-to-end smoke gate.
     its fresh result is recorded below after each documentation sync.
 - CJK IME UX Alignment: Candidate Phase (Phase B) now distinguishes `Space` (commits Hán Nôm Candidate #1) from `Enter` (commits raw pre-edit reading / Quốc ngữ string); supports candidate pagination via `PageUp`/`PageDown`, `=`, `-`, `[`, `]`; and auto-commits Candidate #1 + punctuation on ASCII punctuation input.
 - Interactive Candidate Navigation: Arrow keys (`Up`/`Down`/`Left`/`Right`) and `Tab`/`Shift+Tab` move the highlight cursor across candidate items via `CommonCandidateList::nextCandidate()`/`prevCandidate()`. Pressing `Enter` while a candidate is highlighted commits that glyph; pressing `Enter` with no highlight (`cursorIndex == -1`) commits the raw Quốc ngữ reading. `PageUp`/`PageDown` remain dedicated to page turning.
+- Hán Nôm phrase prediction: the bundled `HNPH` phrase dictionary contains 409 validated two-word entries. A first Space keeps the first Vietnamese word in the preedit and offers typeahead; typing the second word prioritizes an exact full-glyph phrase, then generated two-glyph fallback candidates. A second Space commits the top phrase plus a literal space; raw Enter remains available without a focused candidate.
+- Hán Nôm V2 ABI: `HC_HanNomResultV2` and variable-length borrowed UTF-8 candidate text are additive to the V1 ABI, so multi-glyph phrases and Extension B+ text render safely in Fcitx5. Candidate comments show their full Vietnamese reading.
+- Local phrase learning is enabled by default and stores only normalized phrase reading, selected glyph phrase, count, and timestamp in the local state file. It is bounded to 2,048 entries, uses atomic 0600 writes, supports reset from the Fcitx5 status menu, and never performs file I/O during typing.
 - Fcitx5 UI Lifecycle Fix: `updateHanNomUi` now calls `setCandidateList()`, then `setPreedit()`/`updatePreedit()`, then `updateUserInterface()`, so the candidate popup and client preedit are refreshed together during live Hán Nôm prediction.
 - TypingEngine extracted into `hc_core/src/compose.rs` with `CompositionMode` support (Inline and Dictionary modes).
 - Hán Nôm multi-source data pipeline is active: `scripts/build_nom_dict.rs` parses Unihan, NomStandardization, cake_gao, and pearapple123, producing a validated binary dictionary at `hc_core/data/han_nom_dict.bin` with 7,114 unique readings and 19,134 unique characters (14,297 Extension B+ Nôm characters).
@@ -144,9 +147,10 @@ New borrowed-output ABI:
 
 ## Latest Verification
 
-- 2026-07-22: `scripts/e2e-smoke.sh` passed for `0cd9ab3` with 134 Rust tests,
+- 2026-07-22: `scripts/e2e-smoke.sh` passed for the two-word Hán Nôm phrase upgrade with 140 Rust tests,
   Clippy, the Fcitx5 bridge probe, staged installation, metadata checks,
-  runtime-linkage checks, and ABI-export checks.
+  runtime-linkage checks, ABI-export checks, and deterministic regeneration of
+  both bundled Hán Nôm binaries.
 
 ## Related Docs
 

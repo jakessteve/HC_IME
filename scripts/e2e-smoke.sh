@@ -7,7 +7,12 @@ DESTDIR_PATH="${DESTDIR_PATH:-/tmp/hcime-e2e-install}"
 
 cd "$ROOT"
 
-rustfmt --check hc_core/src/lib.rs
+rustfmt --check hc_core/src/*.rs
+BUILDER_TMP="$(mktemp -d)"
+rustc scripts/build_nom_dict.rs -O -o "$BUILDER_TMP/build_nom_dict"
+"$BUILDER_TMP/build_nom_dict" --output-dir "$BUILDER_TMP/data" >/dev/null
+cmp "$BUILDER_TMP/data/han_nom_dict.bin" hc_core/data/han_nom_dict.bin
+cmp "$BUILDER_TMP/data/han_nom_phrase_dict.bin" hc_core/data/han_nom_phrase_dict.bin
 cargo test --manifest-path hc_core/Cargo.toml
 
 if command -v cargo-clippy >/dev/null 2>&1; then
@@ -50,6 +55,7 @@ grep -q '^Configurable=True$' "$DESTDIR_PATH/usr/share/fcitx5/inputmethod/hcime.
 LD_LIBRARY_PATH="$DESTDIR_PATH/usr/lib/fcitx5" ldd "$ADDON" | grep -q "$CORE"
 readelf -d "$ADDON" | grep -q 'RUNPATH.*\$ORIGIN'
 nm -D "$CORE" | grep -q 'hc_session_handle_key'
+nm -D "$CORE" | grep -q 'hc_session_handle_key_hannom_v2'
 nm -D "$CORE" | grep -q 'hc_compose_with_request'
 nm -D "$CORE" | grep -q 'hc_rehydrate_apply'
 grep -a -q 'HC_IME' "$ADDON"
