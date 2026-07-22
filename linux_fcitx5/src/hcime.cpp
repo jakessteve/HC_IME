@@ -355,6 +355,24 @@ static Utf8KeyResult handleKeyUtf8(void* session, const HC_KeyRequest* request) 
 
 }  // namespace
 
+class HcImeEngine;
+
+class HcNomCandidateWord : public CandidateWord {
+public:
+    HcNomCandidateWord(Text text, Text comment, int index, HcImeEngine* engine)
+        : CandidateWord(std::move(text)), index_(index), engine_(engine) {
+        if (!comment.empty()) {
+            setComment(std::move(comment));
+        }
+    }
+
+    void select(InputContext* ic) const override;
+
+private:
+    int index_;
+    HcImeEngine* engine_;
+};
+
 class HcImeEngine final : public InputMethodEngineV2 {
 public:
     explicit HcImeEngine(AddonManager* manager)
@@ -377,6 +395,23 @@ public:
     }
 
     const Configuration* getConfig() const override { return &config_; }
+
+    void selectHanNomCandidate(InputContext* ic, int candidateIndex) {
+        if (!ic) return;
+        auto& state = stateFor(ic);
+        int32_t mode = toSessionInputMode(*config_.input->inputMode);
+        if (state.session.ptr == nullptr || mode < 3 || mode > 5) return;
+
+        char digitChar = '1' + static_cast<char>(candidateIndex % 9);
+        char textBuf[2] = {digitChar, '\0'};
+        HC_KeyRequest request = makeKeyRequest(HC_KEY_PRINTABLE, textBuf, mode);
+        HC_HanNomResult nomResult;
+        std::memset(&nomResult, 0, sizeof(nomResult));
+        if (hc_session_handle_key_hannom(state.session.ptr, &request, &nomResult) != 0) {
+            const bool useSurroundingText = shouldUseSurroundingText(ic, state);
+            updateHanNomUi(ic, state, nomResult, useSurroundingText);
+        }
+    }
 
     void setConfig(const RawConfig& config) override {
         RawConfig migratedConfig = config;
@@ -865,9 +900,14 @@ private:
                     candidateList->setLabels({"1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9."});
                     candidateList->setPageSize(9);
                     candidateList->setLayoutHint(CandidateLayoutHint::NotSet);
+
+                    std::string readingStr(nomResult.reading, nomResult.reading_len);
+
                     for (uint16_t i = 0; i < nomResult.candidate_count; ++i) {
                         std::string candStr(reinterpret_cast<const char*>(nomResult.candidates[i].utf8), nomResult.candidates[i].byte_len);
-                        candidateList->append<DisplayOnlyCandidateWord>(Text(candStr));
+                        Text wordText(candStr);
+                        Text commentText(!readingStr.empty() ? readingStr : "");
+                        candidateList->append<HcNomCandidateWord>(wordText, commentText, i, this);
                     }
                     ic->inputPanel().setCandidateList(std::move(candidateList));
                 } else {
@@ -1067,6 +1107,12 @@ private:
     std::vector<Connection> actionConnections_;
     std::vector<Action*> registeredActions_;
 };
+
+inline void HcNomCandidateWord::select(InputContext* ic) const {
+    if (engine_ && ic) {
+        engine_->selectHanNomCandidate(ic, index_);
+    }
+}
 
 class HcImeFactory final : public AddonFactory {
 public:
