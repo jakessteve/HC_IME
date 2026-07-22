@@ -41,8 +41,9 @@ cleanup and documentation sync.
   - Core Nom Module (E3): Implemented dual-phase engine (`Reading` & `Candidate` phases), exact & toneless lookups, and candidate pagination.
   - FFI Layer (E4): Added `hc_session_handle_key_hannom` and `hc_nom_dict_status` to Rust C ABI & `hc_core_ffi.h`.
   - Fcitx5 Addon Integration (E5): Extended `HcImeInputMode` enum (`HanNomTelex`, `HanNomVni`, `HanNomViqr`), wired `CommonCandidateList` UI, and updated status menu.
-  - Validation & Tests (E6): Added 116 Rust unit tests (stress test, Ext B+ safety, error fallback) and bridge probe test suite.
-  - Verification (E7): 100% test pass rate across `cargo test` and `./scripts/e2e-smoke.sh`.
+  - Validation & Tests (E6): Added 133 Rust unit tests (stress test, Ext B+ safety, error fallback, CJK IME UX alignment) and bridge probe test suite.
+  - Verification (E7): 100% test pass rate across `cargo test` (133 tests) and `./scripts/e2e-smoke.sh`.
+- CJK IME UX Alignment: Candidate Phase (Phase B) now distinguishes `Space` (commits Hán Nôm Candidate #1) from `Enter` (commits raw pre-edit reading / Quốc ngữ string); supports candidate pagination via `PageUp`/`PageDown`, `=`, `-`, `[`, `]`; and auto-commits Candidate #1 + punctuation on ASCII punctuation input.
 - TypingEngine extracted into `hc_core/src/compose.rs` with `CompositionMode` support (Inline and Dictionary modes).
 - Hán Nôm multi-source data pipeline is active: `scripts/build_nom_dict.rs` parses Unihan, NomStandardization, cake_gao, and pearapple123, producing a validated binary dictionary at `hc_core/data/han_nom_dict.bin` with 7,114 unique readings and 19,134 unique characters (14,297 Extension B+ Nôm characters).
 - Per-app output strategy overrides the global output mode: apps listed in

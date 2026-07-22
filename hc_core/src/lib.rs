@@ -293,7 +293,7 @@ impl Session {
         // Phase B (Candidate Selection)
         if self.nom_phase == NomPhase::Candidate {
             match kind {
-                HCKeyKind::Space | HCKeyKind::Enter => {
+                HCKeyKind::Space => {
                     if !self.nom_candidates.is_empty() {
                         let idx = self.candidate_page * 9;
                         if idx < self.nom_candidates.len() {
@@ -303,6 +303,18 @@ impl Session {
                         }
                     }
                     self.reset();
+                    result.handled = 1;
+                    return 1;
+                }
+                HCKeyKind::Enter => {
+                    // CJK standard: Enter in candidate phase commits raw pre-edit reading (Quốc Ngữ)
+                    let commit_str = self.buffer.clone();
+                    self.reset();
+                    result.status_flag = HCStatusFlag::Commit as i32;
+                    let bytes = commit_str.as_bytes();
+                    let len = bytes.len().min(255);
+                    result.reading[..len].copy_from_slice(&bytes[..len]);
+                    result.reading_len = len as u16;
                     result.handled = 1;
                     return 1;
                 }
@@ -331,6 +343,39 @@ impl Session {
                             return 1;
                         }
                         self.populate_nom_result(result, 1);
+                        return 1;
+                    }
+                    if first_ch == '=' || first_ch == ']' || first_ch == '+' {
+                        if (self.candidate_page + 1) * 9 < self.nom_candidates.len() {
+                            self.candidate_page += 1;
+                        }
+                        self.populate_nom_result(result, 1);
+                        return 1;
+                    }
+                    if first_ch == '-' || first_ch == '[' {
+                        if self.candidate_page > 0 {
+                            self.candidate_page -= 1;
+                        }
+                        self.populate_nom_result(result, 1);
+                        return 1;
+                    }
+                    if is_nom_punctuation(first_ch) {
+                        let mut output = String::new();
+                        let idx = self.candidate_page * 9;
+                        if idx < self.nom_candidates.len() {
+                            output.push(self.nom_candidates[idx]);
+                        } else {
+                            output.push_str(&self.buffer);
+                        }
+                        output.push(first_ch);
+
+                        result.status_flag = HCStatusFlag::Commit as i32;
+                        let bytes = output.as_bytes();
+                        let len = bytes.len().min(255);
+                        result.reading[..len].copy_from_slice(&bytes[..len]);
+                        result.reading_len = len as u16;
+                        result.handled = 1;
+                        self.reset();
                         return 1;
                     }
                     self.nom_phase = NomPhase::Reading;
@@ -576,6 +621,31 @@ fn candidate_if_matches(
         .collect();
 
     (render_raw_input(&candidate, InputMode::Vni, legacy_tone) == target).then_some(candidate)
+}
+
+fn is_nom_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        '.' | ','
+            | '!'
+            | '?'
+            | ';'
+            | ':'
+            | '('
+            | ')'
+            | '"'
+            | '\''
+            | '/'
+            | '\\'
+            | '@'
+            | '#'
+            | '$'
+            | '%'
+            | '^'
+            | '&'
+            | '*'
+            | '~'
+    )
 }
 
 #[no_mangle]

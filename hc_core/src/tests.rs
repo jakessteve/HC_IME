@@ -2751,3 +2751,160 @@ fn hannom_backspace_in_candidate_phase_returns_to_reading_minus_one() {
 
     hc_session_free(session);
 }
+
+#[test]
+fn hannom_enter_in_candidate_phase_commits_raw_preedit() {
+    // CJK IME standard: Enter in candidate phase commits raw reading (Quốc Ngữ)
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut res: HC_HanNomResult = unsafe { std::mem::zeroed() };
+
+    // Type "thieen" + Space -> candidate phase
+    for ch in "thieen".chars() {
+        let s = ch.to_string();
+        let c_str = c(&s);
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = c_str.as_ptr();
+        hc_session_handle_key_hannom(session, &req, &mut res);
+    }
+    let space = c(" ");
+    req.kind = HCKeyKind::Space as i32;
+    req.text = space.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+    assert!(res.candidate_count > 0);
+
+    // Press Enter -> should commit raw reading "thiên"
+    let enter = c("");
+    req.kind = HCKeyKind::Enter as i32;
+    req.text = enter.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+
+    assert_eq!(res.status_flag, HCStatusFlag::Commit as i32);
+    assert_eq!(res.handled, 1);
+    let committed = std::str::from_utf8(&res.reading[..res.reading_len as usize]).unwrap();
+    assert_eq!(
+        committed, "thiên",
+        "Enter in candidate phase must commit raw reading"
+    );
+
+    hc_session_free(session);
+}
+
+#[test]
+fn hannom_candidate_pagination_equals_and_dash() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut res: HC_HanNomResult = unsafe { std::mem::zeroed() };
+
+    // Type "nam" + Space -> candidate phase
+    for ch in "nam".chars() {
+        let s = ch.to_string();
+        let c_str = c(&s);
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = c_str.as_ptr();
+        hc_session_handle_key_hannom(session, &req, &mut res);
+    }
+    let space = c(" ");
+    req.kind = HCKeyKind::Space as i32;
+    req.text = space.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+    assert_eq!(res.page, 0);
+
+    let total = res.total_candidates;
+    if total > 9 {
+        // Press '=' to advance to page 1
+        let eq = c("=");
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = eq.as_ptr();
+        hc_session_handle_key_hannom(session, &req, &mut res);
+        assert_eq!(res.page, 1, "page should advance to 1 after '='");
+
+        // Press '-' to return to page 0
+        let dash = c("-");
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = dash.as_ptr();
+        hc_session_handle_key_hannom(session, &req, &mut res);
+        assert_eq!(res.page, 0, "page should return to 0 after '-'");
+    }
+
+    hc_session_free(session);
+}
+
+#[test]
+fn hannom_candidate_pagination_brackets() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut res: HC_HanNomResult = unsafe { std::mem::zeroed() };
+
+    // Type "nam" + Space -> candidate phase
+    for ch in "nam".chars() {
+        let s = ch.to_string();
+        let c_str = c(&s);
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = c_str.as_ptr();
+        hc_session_handle_key_hannom(session, &req, &mut res);
+    }
+    let space = c(" ");
+    req.kind = HCKeyKind::Space as i32;
+    req.text = space.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+
+    if res.total_candidates > 9 {
+        // Press ']' to page down
+        let close_b = c("]");
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = close_b.as_ptr();
+        hc_session_handle_key_hannom(session, &req, &mut res);
+        assert_eq!(res.page, 1, "page should advance to 1 after ']'");
+
+        // Press '[' to page up
+        let open_b = c("[");
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = open_b.as_ptr();
+        hc_session_handle_key_hannom(session, &req, &mut res);
+        assert_eq!(res.page, 0, "page should return to 0 after '['");
+    }
+
+    hc_session_free(session);
+}
+
+#[test]
+fn hannom_punctuation_autocommits_candidate_plus_punct() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut res: HC_HanNomResult = unsafe { std::mem::zeroed() };
+
+    // Type "thieen" + Space -> candidate phase
+    for ch in "thieen".chars() {
+        let s = ch.to_string();
+        let c_str = c(&s);
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = c_str.as_ptr();
+        hc_session_handle_key_hannom(session, &req, &mut res);
+    }
+    let space = c(" ");
+    req.kind = HCKeyKind::Space as i32;
+    req.text = space.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+    assert!(res.candidate_count > 0);
+
+    // Type period '.' -> should auto-commit candidate #1 + '.'
+    let dot = c(".");
+    req.kind = HCKeyKind::Printable as i32;
+    req.text = dot.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+
+    assert_eq!(res.status_flag, HCStatusFlag::Commit as i32);
+    assert_eq!(res.handled, 1);
+    let committed = std::str::from_utf8(&res.reading[..res.reading_len as usize]).unwrap();
+    assert!(
+        committed.ends_with('.'),
+        "committed output should end with punctuation '.'"
+    );
+    assert!(
+        committed.chars().count() >= 2,
+        "committed output should contain candidate + punctuation"
+    );
+
+    hc_session_free(session);
+}
