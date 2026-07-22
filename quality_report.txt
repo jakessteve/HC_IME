@@ -1,0 +1,12 @@
+Hán Nôm Dictionary Quality Report
+=================================
+Total unique readings: 7114
+Total unique characters: 19134
+Extension B+ (Nôm) characters: 14297
+Skipped empty CHUNOM rows from NomStd: 9852
+
+Sample assertions verified:
+  thiên -> 天: PASS
+  địa -> 地: PASS
+  nhân -> 人: PASS
+  việt -> 越: PASS

@@ -111,11 +111,14 @@ int main() {
         InputContextEvent activateEvent(&ic, EventType::InputContextInputMethodActivated);
         engine.activate(entry, activateEvent);
         const auto actions = hcimeStatusActions(ic);
-        require(actions.size() == 8, "status menu exposes three modes, a separator, and four behavior toggles");
+        require(actions.size() == 11, "status menu exposes six modes, a separator, and four behavior toggles");
         require(actions[0]->shortText(&ic) == "VNI", "status menu includes VNI mode");
         require(actions[1]->shortText(&ic) == "TELEX", "status menu includes Telex mode");
         require(actions[2]->shortText(&ic) == "VIQR", "status menu includes VIQR mode");
-        require(actions[3]->isSeparator(), "status menu separates mode and behavior groups");
+        require(actions[3]->shortText(&ic) == "HN-TELEX", "status menu includes HN-TELEX mode");
+        require(actions[4]->shortText(&ic) == "HN-VNI", "status menu includes HN-VNI mode");
+        require(actions[5]->shortText(&ic) == "HN-VIQR", "status menu includes HN-VIQR mode");
+        require(actions[6]->isSeparator(), "status menu separates mode and behavior groups");
         require(actions[1]->isChecked(&ic), "Telex mode is checked by default");
 
         require(send(engine, entry, ic, FcitxKey_a), "a accepted");
@@ -176,6 +179,8 @@ int main() {
     {
         InputContextManager manager;
         MockInputContext ic(manager);
+        ic.setCapabilityFlags(CapabilityFlags(CapabilityFlag::SurroundingText));
+        ic.surroundingText().setText(" ", 1, 1);
         hcime::HcImeEngine engine(nullptr);
         const auto entries = engine.listInputMethods();
         const auto& entry = entries.front();
@@ -390,6 +395,34 @@ int main() {
         require(send(engine, entry, ic, FcitxKey_w), "re-sync w accepted");
         require(ic.commits.size() == commitsBeforeResync + 1, "re-sync after app modification commits new text");
         require(ic.surroundingDeletes.size() == deletesBeforeResync, "re-sync after app modification does not delete stale surrounding");
+    }
+
+    {
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        RawConfig config;
+        config.setValueByPath("InputMethod", "HanNomTelex");
+        engine.setConfig(config);
+        require(engine.subMode(entry, ic) == "Hán Nôm (Telex)", "mode switches to Hán Nôm (Telex)");
+
+        require(send(engine, entry, ic, FcitxKey_t), "HanNom t accepted");
+        require(send(engine, entry, ic, FcitxKey_h), "HanNom h accepted");
+        require(send(engine, entry, ic, FcitxKey_i), "HanNom i accepted");
+        require(send(engine, entry, ic, FcitxKey_e), "HanNom e1 accepted");
+        require(send(engine, entry, ic, FcitxKey_e), "HanNom e2 accepted");
+        require(send(engine, entry, ic, FcitxKey_n), "HanNom n accepted");
+        require(ic.inputPanel().clientPreedit().toString() == "thiên", "HanNom Telex composes reading thiên");
+
+        require(send(engine, entry, ic, FcitxKey_space), "HanNom space accepted");
+        require(ic.inputPanel().candidateList() != nullptr, "HanNom space populates candidateList");
+        require(ic.inputPanel().candidateList()->size() > 0, "HanNom candidateList is non-empty");
+
+        require(send(engine, entry, ic, FcitxKey_1), "HanNom digit 1 accepted");
+        require(ic.commits.size() == 1, "HanNom digit 1 commits selected character");
+        require(ic.inputPanel().candidateList() == nullptr, "HanNom selection clears candidateList");
     }
 
     std::cout << "HC_IME bridge probe passed\n";

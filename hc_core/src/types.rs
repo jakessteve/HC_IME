@@ -66,6 +66,36 @@ pub struct HC_Utf8KeyResult {
     pub handled: u8,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HC_CandidateChar {
+    pub utf8: [u8; 5],
+    pub byte_len: u8,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HC_HanNomResult {
+    pub status_flag: i32,
+    pub error_code: i32,
+    pub reading: [u8; 256],
+    pub reading_len: u16,
+    pub candidates: *const HC_CandidateChar,
+    pub candidate_count: u16,
+    pub page: u16,
+    pub total_candidates: u16,
+    pub has_more: u8,
+    pub handled: u8,
+}
+
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NomPhase {
+    #[default]
+    Reading = 0,
+    Candidate = 1,
+}
+
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HCSpellCheckStatus {
@@ -117,6 +147,9 @@ pub enum InputMode {
     Telex = 0,
     Vni = 1,
     Viqr = 2,
+    HanNomTelex = 3,
+    HanNomVni = 4,
+    HanNomViqr = 5,
 }
 
 impl TryFrom<i32> for InputMode {
@@ -127,7 +160,10 @@ impl TryFrom<i32> for InputMode {
             0 => InputMode::Telex,
             1 => InputMode::Vni,
             2 => InputMode::Viqr,
-            _ => return Err(HCErrorCode::InvalidInputMode),
+            3 => InputMode::HanNomTelex,
+            4 => InputMode::HanNomVni,
+            5 => InputMode::HanNomViqr,
+            _ => InputMode::Telex,
         })
     }
 }

@@ -3,6 +3,7 @@
 #include <fcitx/action.h>
 #include <fcitx/addonfactory.h>
 #include <fcitx/addonmanager.h>
+#include <fcitx/candidatelist.h>
 #include <fcitx-config/configuration.h>
 #include <fcitx-config/enum.h>
 #include <fcitx-config/iniparser.h>
@@ -85,9 +86,12 @@ enum class HcImeInputMode {
     Telex,
     Vni,
     Viqr,
+    HanNomTelex,
+    HanNomVni,
+    HanNomViqr,
 };
 
-FCITX_CONFIG_ENUM_NAME(HcImeInputMode, "Telex", "VNI", "VIQR");
+FCITX_CONFIG_ENUM_NAME(HcImeInputMode, "Telex", "VNI", "VIQR", "HanNomTelex", "HanNomVni", "HanNomViqr");
 
 enum class HcImeEnglishProtection {
     Off,
@@ -111,6 +115,9 @@ enum class HcImeMenuItem {
     ModeTelex,
     ModeVni,
     ModeViqr,
+    ModeHanNomTelex,
+    ModeHanNomVni,
+    ModeHanNomViqr,
     SpellCheck,
     AutoRestore,
     DisplayUnderline,
@@ -188,6 +195,9 @@ static int32_t toSessionInputMode(HcImeInputMode mode) {
         case HcImeInputMode::Telex: return kInputModeTelex;
         case HcImeInputMode::Vni: return 1;
         case HcImeInputMode::Viqr: return 2;
+        case HcImeInputMode::HanNomTelex: return 3;
+        case HcImeInputMode::HanNomVni: return 4;
+        case HcImeInputMode::HanNomViqr: return 5;
     }
     return kInputModeTelex;
 }
@@ -206,6 +216,9 @@ static const char* modeLabel(HcImeInputMode mode) {
         case HcImeInputMode::Telex: return "Telex";
         case HcImeInputMode::Vni: return "VNI";
         case HcImeInputMode::Viqr: return "VIQR";
+        case HcImeInputMode::HanNomTelex: return "Hán Nôm (Telex)";
+        case HcImeInputMode::HanNomVni: return "Hán Nôm (VNI)";
+        case HcImeInputMode::HanNomViqr: return "Hán Nôm (VIQR)";
     }
     return "Telex";
 }
@@ -485,6 +498,60 @@ public:
             loadMacrosIntoSession(state.session.ptr, *config_.macroFilePath);
         }
 
+        if (mode >= 3 && mode <= 5) {
+            HC_HanNomResult nomResult;
+            std::memset(&nomResult, 0, sizeof(nomResult));
+            int32_t handled = hc_session_handle_key_hannom(state.session.ptr, &request, &nomResult);
+            if (handled == 0) return;
+
+            if (nomResult.status_flag == HC_STATUS_COMMIT) {
+                std::string output(nomResult.reading, nomResult.reading_len);
+                if (useSurroundingText) {
+                    commitViaSurroundingText(event.inputContext(), state, output);
+                } else {
+                    event.inputContext()->commitString(output);
+                }
+                state.hasActivePreedit = false;
+                state.lastCommitTrailingChars = 0;
+                state.previousSurroundingText.clear();
+                state.surroundingTextEnabled = false;
+                clearPreedit(event.inputContext());
+                event.inputContext()->inputPanel().setCandidateList(nullptr);
+                event.filterAndAccept();
+                return;
+            }
+
+            if (nomResult.status_flag == HC_STATUS_IN_PROGRESS) {
+                std::string output(nomResult.reading, nomResult.reading_len);
+                state.lastCommitTrailingChars = 0;
+                state.hasActivePreedit = !output.empty();
+                if (output.empty()) {
+                    clearPreedit(event.inputContext());
+                    event.inputContext()->inputPanel().setCandidateList(nullptr);
+                } else {
+                    if (useSurroundingText && state.hasActivePreedit) {
+                        applySurroundingTextPreedit(event.inputContext(), state, output);
+                    } else {
+                        setPreedit(event.inputContext(), output, *config_.behavior->displayUnderline, 0);
+                    }
+
+                    if (nomResult.candidate_count > 0 && nomResult.candidates != nullptr) {
+                        auto candidateList = std::make_unique<CommonCandidateList>();
+                        for (uint16_t i = 0; i < nomResult.candidate_count; ++i) {
+                            std::string candStr(reinterpret_cast<const char*>(nomResult.candidates[i].utf8), nomResult.candidates[i].byte_len);
+                            candidateList->append<DisplayOnlyCandidateWord>(Text(candStr));
+                        }
+                        event.inputContext()->inputPanel().setCandidateList(std::move(candidateList));
+                    } else {
+                        event.inputContext()->inputPanel().setCandidateList(nullptr);
+                    }
+                }
+                event.filterAndAccept();
+                return;
+            }
+            return;
+        }
+
         const Utf8KeyResult result = handleKeyUtf8(state.session.ptr, &request);
         const std::string& output = result.text;
 
@@ -743,6 +810,10 @@ private:
 
     bool tryReconvertLastCommitFromBackspace(KeyEvent& event, ContextState& state, int32_t mode, bool useSurroundingText) {
         if (state.session.ptr == nullptr || state.lastCommitTrailingChars == 0) return false;
+        const bool canDeleteSurrounding = useSurroundingText ||
+            (event.inputContext()->capabilityFlags().test(CapabilityFlag::SurroundingText) &&
+             (event.inputContext()->surroundingText().isValid() || state.lastCommitTrailingChars > 0));
+        if (!canDeleteSurrounding) return false;
         HC_KeyRequest request{makeKeyRequest(HC_KEY_BACKSPACE, nullptr, mode)};
         const Utf8KeyResult result = handleKeyUtf8(state.session.ptr, &request);
         if (result.handled == 0 || result.errorCode < 0 ||
@@ -799,6 +870,9 @@ private:
         modeActions_[1] = addToggleAction("VNI", HcImeMenuItem::ModeVni, "Switch to VNI");
         modeActions_[0] = addToggleAction("TELEX", HcImeMenuItem::ModeTelex, "Switch to Telex");
         modeActions_[2] = addToggleAction("VIQR", HcImeMenuItem::ModeViqr, "Switch to VIQR");
+        modeActions_[3] = addToggleAction("HN-TELEX", HcImeMenuItem::ModeHanNomTelex, "Switch to Hán Nôm (Telex)");
+        modeActions_[4] = addToggleAction("HN-VNI", HcImeMenuItem::ModeHanNomVni, "Switch to Hán Nôm (VNI)");
+        modeActions_[5] = addToggleAction("HN-VIQR", HcImeMenuItem::ModeHanNomViqr, "Switch to Hán Nôm (VIQR)");
         separatorAction_ = addSeparatorAction();
         toggleActions_[0] = addToggleAction("Spell check", HcImeMenuItem::SpellCheck, "Toggle Vietnamese word validation");
         toggleActions_[1] = addToggleAction("Auto restore", HcImeMenuItem::AutoRestore, "Toggle raw-keystroke restore");
@@ -818,6 +892,9 @@ private:
         registerStatusAction("hcime-mode-telex", modeActions_[0].get());
         registerStatusAction("hcime-mode-vni", modeActions_[1].get());
         registerStatusAction("hcime-mode-viqr", modeActions_[2].get());
+        registerStatusAction("hcime-mode-hanteles", modeActions_[3].get());
+        registerStatusAction("hcime-mode-hanvni", modeActions_[4].get());
+        registerStatusAction("hcime-mode-hanviqr", modeActions_[5].get());
         registerStatusAction("hcime-mode-separator", separatorAction_.get());
         registerStatusAction("hcime-toggle-spell-check", toggleActions_[0].get());
         registerStatusAction("hcime-toggle-auto-restore", toggleActions_[1].get());
@@ -835,6 +912,9 @@ private:
         modeActions_[0]->setChecked(*config_.input->inputMode == HcImeInputMode::Telex);
         modeActions_[1]->setChecked(*config_.input->inputMode == HcImeInputMode::Vni);
         modeActions_[2]->setChecked(*config_.input->inputMode == HcImeInputMode::Viqr);
+        modeActions_[3]->setChecked(*config_.input->inputMode == HcImeInputMode::HanNomTelex);
+        modeActions_[4]->setChecked(*config_.input->inputMode == HcImeInputMode::HanNomVni);
+        modeActions_[5]->setChecked(*config_.input->inputMode == HcImeInputMode::HanNomViqr);
         toggleActions_[0]->setChecked(*config_.behavior->spellCheck);
         toggleActions_[1]->setChecked(*config_.behavior->autoRestore);
         toggleActions_[2]->setChecked(*config_.behavior->displayUnderline);
@@ -847,6 +927,9 @@ private:
         statusArea.addAction(StatusGroup::InputMethod, modeActions_[1].get());
         statusArea.addAction(StatusGroup::InputMethod, modeActions_[0].get());
         statusArea.addAction(StatusGroup::InputMethod, modeActions_[2].get());
+        statusArea.addAction(StatusGroup::InputMethod, modeActions_[3].get());
+        statusArea.addAction(StatusGroup::InputMethod, modeActions_[4].get());
+        statusArea.addAction(StatusGroup::InputMethod, modeActions_[5].get());
         statusArea.addAction(StatusGroup::InputMethod, separatorAction_.get());
         for (const auto& action : toggleActions_) statusArea.addAction(StatusGroup::InputMethod, action.get());
         ic->updateUserInterface(UserInterfaceComponent::StatusArea, true);
@@ -859,6 +942,9 @@ private:
             case HcImeMenuItem::ModeTelex: *inputConfig->inputMode.mutableValue() = HcImeInputMode::Telex; break;
             case HcImeMenuItem::ModeVni: *inputConfig->inputMode.mutableValue() = HcImeInputMode::Vni; break;
             case HcImeMenuItem::ModeViqr: *inputConfig->inputMode.mutableValue() = HcImeInputMode::Viqr; break;
+            case HcImeMenuItem::ModeHanNomTelex: *inputConfig->inputMode.mutableValue() = HcImeInputMode::HanNomTelex; break;
+            case HcImeMenuItem::ModeHanNomVni: *inputConfig->inputMode.mutableValue() = HcImeInputMode::HanNomVni; break;
+            case HcImeMenuItem::ModeHanNomViqr: *inputConfig->inputMode.mutableValue() = HcImeInputMode::HanNomViqr; break;
             case HcImeMenuItem::SpellCheck: *behaviorConfig->spellCheck.mutableValue() = !*behaviorConfig->spellCheck; break;
             case HcImeMenuItem::AutoRestore: *behaviorConfig->autoRestore.mutableValue() = !*behaviorConfig->autoRestore; break;
             case HcImeMenuItem::DisplayUnderline: *behaviorConfig->displayUnderline.mutableValue() = !*behaviorConfig->displayUnderline; break;
@@ -943,7 +1029,7 @@ private:
     Instance* instance_ = nullptr;
     std::unordered_map<ICUUID, ContextState, IcuuidHash> contexts_;
     HcImeConfig config_;
-    std::array<std::unique_ptr<SimpleAction>, 3> modeActions_;
+    std::array<std::unique_ptr<SimpleAction>, 6> modeActions_;
     std::unique_ptr<SimpleAction> separatorAction_;
     std::array<std::unique_ptr<SimpleAction>, 4> toggleActions_;
     std::vector<Connection> actionConnections_;

@@ -2,6 +2,8 @@ use std::cell::RefCell;
 use std::ffi::{c_char, CStr};
 use std::ptr;
 
+pub mod compose;
+pub mod han_nom;
 mod language;
 mod quick_consonants;
 mod session;
@@ -173,6 +175,36 @@ impl Session {
                     };
                     let single_char = chars.next().is_none();
 
+                    // Auto-reopen last commit for VNI digit transformation within edit window.
+                    // For tone digits (1-5), only reopen when the committed word has no tone,
+                    // so that standalone numbers after a toned word pass through as literals.
+                    // For diacritic digits (6-9) and 0, use the normal transform check.
+                    let auto_reopen_allowed = self.can_edit_last_commit() && {
+                        if ('1'..='5').contains(&first_char) {
+                            strip_all_marks(&self.last_commit) == self.last_commit
+                        } else {
+                            vni_digit_transforms_buffer(
+                                &self.last_commit,
+                                first_char,
+                                self.legacy_tone,
+                            )
+                        }
+                    };
+                    if self.mode == InputMode::Vni
+                        && single_char
+                        && first_char.is_ascii_digit()
+                        && self.buffer.is_empty()
+                        && self.raw_buffer.is_empty()
+                        && auto_reopen_allowed
+                    {
+                        self.buffer = self.last_commit.clone();
+                        self.raw_buffer = if self.last_raw.is_empty() {
+                            strip_all_marks(&self.buffer)
+                        } else {
+                            self.last_raw.clone()
+                        };
+                    }
+
                     self.last_commit.clear();
                     self.last_raw.clear();
                     self.last_commit_time = None;
@@ -216,6 +248,249 @@ impl Session {
         HC_KeyResult {
             state: hc_error_state(HCErrorCode::InvalidEditTrigger),
             handled: 0,
+        }
+    }
+
+    pub fn handle_han_nom_key(
+        &mut self,
+        request: &HC_KeyRequest,
+        result: &mut HC_HanNomResult,
+    ) -> i32 {
+        result.status_flag = HCStatusFlag::InProgress as i32;
+        result.error_code = HCErrorCode::None as i32;
+        result.handled = 0;
+        result.reading_len = 0;
+        result.candidate_count = 0;
+        result.page = 0;
+        result.total_candidates = 0;
+        result.has_more = 0;
+        result.candidates = ptr::null();
+
+        let mode = match InputMode::try_from(request.input_mode) {
+            Ok(m) => m,
+            Err(_) => {
+                result.error_code = HCErrorCode::InvalidInputMode as i32;
+                return 0;
+            }
+        };
+        self.mode = mode;
+
+        let dict = match han_nom::get_global_dict() {
+            Ok(d) => d,
+            Err(err) => {
+                result.error_code = err as i32;
+                return 0;
+            }
+        };
+
+        let kind = match key_kind(request.kind) {
+            Some(k) => k,
+            None => return 0,
+        };
+
+        let text = key_text(request.text).unwrap_or("");
+
+        // Phase B (Candidate Selection)
+        if self.nom_phase == NomPhase::Candidate {
+            match kind {
+                HCKeyKind::Space | HCKeyKind::Enter => {
+                    if !self.nom_candidates.is_empty() {
+                        let idx = self.candidate_page * 9;
+                        if idx < self.nom_candidates.len() {
+                            let selected_char = self.nom_candidates[idx];
+                            self.commit_nom_char(selected_char, result);
+                            return 1;
+                        }
+                    }
+                    self.reset();
+                    result.handled = 1;
+                    return 1;
+                }
+                HCKeyKind::Escape => {
+                    self.nom_phase = NomPhase::Reading;
+                    self.populate_nom_result(result, 1);
+                    return 1;
+                }
+                HCKeyKind::Backspace => {
+                    self.nom_phase = NomPhase::Reading;
+                    if !self.raw_buffer.is_empty() {
+                        self.raw_buffer.pop();
+                        self.render_from_raw();
+                    }
+                    self.populate_nom_result(result, 1);
+                    return 1;
+                }
+                HCKeyKind::Printable => {
+                    let first_ch = text.chars().next().unwrap_or('\0');
+                    if first_ch.is_ascii_digit() && first_ch != '0' {
+                        let digit_val = first_ch.to_digit(10).unwrap() as usize;
+                        let idx = self.candidate_page * 9 + (digit_val - 1);
+                        if idx < self.nom_candidates.len() {
+                            let selected_char = self.nom_candidates[idx];
+                            self.commit_nom_char(selected_char, result);
+                            return 1;
+                        }
+                        self.populate_nom_result(result, 1);
+                        return 1;
+                    }
+                    self.nom_phase = NomPhase::Reading;
+                }
+                _ => {
+                    self.nom_phase = NomPhase::Reading;
+                }
+            }
+        }
+
+        // Phase A (Reading)
+        match kind {
+            HCKeyKind::Escape => {
+                self.reset();
+                self.populate_nom_result(result, 1);
+                1
+            }
+            HCKeyKind::Backspace => {
+                if !self.raw_buffer.is_empty() {
+                    match self.mode {
+                        InputMode::Vni | InputMode::HanNomVni => {
+                            self.raw_buffer = vni_raw_after_visible_backspace(
+                                &self.raw_buffer,
+                                &self.buffer,
+                                self.legacy_tone,
+                            );
+                            self.render_from_raw();
+                        }
+                        _ => {
+                            self.raw_buffer.pop();
+                            self.render_from_raw();
+                        }
+                    }
+                }
+                self.populate_nom_result(result, 1);
+                1
+            }
+            HCKeyKind::Space | HCKeyKind::Enter => {
+                if self.buffer.is_empty() {
+                    result.handled = 0;
+                    0
+                } else {
+                    let candidates = dict.lookup(&self.buffer);
+                    if !candidates.is_empty() {
+                        self.nom_candidates = candidates;
+                        self.nom_phase = NomPhase::Candidate;
+                        self.candidate_page = 0;
+                        self.reading_buffer = self.buffer.clone();
+                        self.populate_nom_result(result, 1);
+                        1
+                    } else {
+                        let commit_str = self.buffer.clone();
+                        self.reset();
+                        result.status_flag = HCStatusFlag::Commit as i32;
+                        let bytes = commit_str.as_bytes();
+                        let len = bytes.len().min(255);
+                        result.reading[..len].copy_from_slice(&bytes[..len]);
+                        result.reading_len = len as u16;
+                        result.handled = 1;
+                        1
+                    }
+                }
+            }
+            HCKeyKind::Printable => {
+                let first_ch = text.chars().next().unwrap_or('\0');
+                match self.mode {
+                    InputMode::HanNomVni | InputMode::Vni => {
+                        if first_ch.is_ascii_digit() {
+                            if self.raw_buffer.is_empty() {
+                                result.handled = 0;
+                                return 0;
+                            }
+                            compose::TypingEngine::apply_vni_trigger(
+                                &mut self.buffer,
+                                first_ch,
+                                self.legacy_tone,
+                            );
+                            self.raw_buffer.push(first_ch);
+                            self.populate_nom_result(result, 1);
+                            return 1;
+                        }
+                    }
+                    _ => {
+                        if first_ch.is_ascii_digit() {
+                            result.handled = 0;
+                            return 0;
+                        }
+                    }
+                }
+
+                if self.raw_buffer.len() < 64 {
+                    self.raw_buffer.push_str(text);
+                    self.render_from_raw();
+                }
+                self.populate_nom_result(result, 1);
+                1
+            }
+            _ => {
+                result.handled = 0;
+                0
+            }
+        }
+    }
+
+    fn commit_nom_char(&mut self, ch: char, result: &mut HC_HanNomResult) {
+        let mut utf8_bytes = [0u8; 5];
+        let s = ch.to_string();
+        let bytes = s.as_bytes();
+        let len = bytes.len().min(4);
+        utf8_bytes[..len].copy_from_slice(&bytes[..len]);
+
+        result.status_flag = HCStatusFlag::Commit as i32;
+        result.reading[..len].copy_from_slice(&bytes[..len]);
+        result.reading_len = len as u16;
+        result.handled = 1;
+
+        self.reset();
+    }
+
+    fn populate_nom_result(&mut self, result: &mut HC_HanNomResult, handled: u8) {
+        result.handled = handled;
+        let r_bytes = self.buffer.as_bytes();
+        let r_len = r_bytes.len().min(255);
+        result.reading[..r_len].copy_from_slice(&r_bytes[..r_len]);
+        result.reading_len = r_len as u16;
+
+        if self.nom_phase == NomPhase::Candidate && !self.nom_candidates.is_empty() {
+            let start = self.candidate_page * 9;
+            let end = (start + 9).min(self.nom_candidates.len());
+            let page_candidates = &self.nom_candidates[start..end];
+
+            self.ffi_candidates_buf.clear();
+            for &ch in page_candidates {
+                let mut candidate_char = HC_CandidateChar {
+                    utf8: [0u8; 5],
+                    byte_len: 0,
+                };
+                let s = ch.to_string();
+                let b = s.as_bytes();
+                let b_len = b.len().min(4);
+                candidate_char.utf8[..b_len].copy_from_slice(&b[..b_len]);
+                candidate_char.byte_len = b_len as u8;
+                self.ffi_candidates_buf.push(candidate_char);
+            }
+
+            result.candidates = self.ffi_candidates_buf.as_ptr();
+            result.candidate_count = self.ffi_candidates_buf.len() as u16;
+            result.page = self.candidate_page as u16;
+            result.total_candidates = self.nom_candidates.len() as u16;
+            result.has_more = if end < self.nom_candidates.len() {
+                1
+            } else {
+                0
+            };
+        } else {
+            result.candidates = ptr::null();
+            result.candidate_count = 0;
+            result.page = 0;
+            result.total_candidates = 0;
+            result.has_more = 0;
         }
     }
 }
@@ -701,13 +976,37 @@ fn apply_edit_trigger_to_word(word: &str, mode: InputMode, trigger: EditTrigger)
         EditTrigger::VniDiacritic => {
             let mut clone = word.to_string();
             let _ = match mode {
-                InputMode::Telex => apply_telex_w(&mut clone),
-                InputMode::Vni => apply_circumflex(&mut clone),
-                InputMode::Viqr => apply_circumflex(&mut clone),
+                InputMode::Telex | InputMode::HanNomTelex => apply_telex_w(&mut clone),
+                InputMode::Vni | InputMode::HanNomVni => apply_circumflex(&mut clone),
+                InputMode::Viqr | InputMode::HanNomViqr => apply_circumflex(&mut clone),
             };
             clone
         }
         EditTrigger::LiteralNumber => word.to_string(),
         EditTrigger::Escape => word.to_string(),
+    }
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn hc_session_handle_key_hannom(
+    session: *mut std::ffi::c_void,
+    request: *const HC_KeyRequest,
+    result: *mut HC_HanNomResult,
+) -> i32 {
+    if session.is_null() || request.is_null() || result.is_null() {
+        return 0;
+    }
+    unsafe {
+        let session = &mut *(session as *mut Session);
+        session.handle_han_nom_key(&*request, &mut *result)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn hc_nom_dict_status(_session: *mut std::ffi::c_void) -> i32 {
+    match han_nom::get_global_dict() {
+        Ok(_) => 0,
+        Err(err) => err as i32,
     }
 }

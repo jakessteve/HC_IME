@@ -108,17 +108,17 @@ pub fn segment_context(input: &str) -> Vec<ContextSegment> {
 fn raw_base_for_vietnamese_shape(raw: &str, mode: InputMode) -> String {
     let mut chars: Vec<char> = raw.chars().collect();
     match mode {
-        InputMode::Telex => {
+        InputMode::Telex | InputMode::HanNomTelex => {
             while raw_has_terminal_telex_trigger(&chars) {
                 chars.pop();
             }
         }
-        InputMode::Vni => {
+        InputMode::Vni | InputMode::HanNomVni => {
             while chars.last().is_some_and(|last| last.is_ascii_digit()) {
                 chars.pop();
             }
         }
-        InputMode::Viqr => {
+        InputMode::Viqr | InputMode::HanNomViqr => {
             if chars.last().is_some_and(|last| is_viqr_trigger(*last)) {
                 chars.pop();
             }
@@ -133,9 +133,9 @@ fn is_terminal_vietnamese_trigger(raw: &str, mode: InputMode) -> bool {
         return false;
     };
     match mode {
-        InputMode::Telex => raw_has_terminal_telex_trigger(&chars),
-        InputMode::Vni => matches!(last, '1'..='9'),
-        InputMode::Viqr => matches!(last, '\'' | '`' | '?' | '~' | '.'),
+        InputMode::Telex | InputMode::HanNomTelex => raw_has_terminal_telex_trigger(&chars),
+        InputMode::Vni | InputMode::HanNomVni => matches!(last, '1'..='9'),
+        InputMode::Viqr | InputMode::HanNomViqr => matches!(last, '\'' | '`' | '?' | '~' | '.'),
     }
 }
 

@@ -35,6 +35,16 @@ cleanup and documentation sync.
 - VNI mode includes specialized handling for English words containing Telex 
   trigger characters (s, f, r, x, j, w, z) to prevent cross-contamination and
   false diacritic application during composition.
+- Hán Nôm core engine & Fcitx5 addon feature fully implemented across all 7 Epics (Tasks T1.0 - T7.3):
+  - Data Pipeline (E1): Parsed Unihan, NomStandardization, cake_gao, pearapple123 into binary format v1 `hc_core/data/han_nom_dict.bin` (7,114 unique readings, 19,134 unique characters, 14,297 Extension B+ Nôm characters).
+  - Composition Engine Refactor (E2): Extracted `TypingEngine` in `hc_core/src/compose.rs` supporting `Inline` & `Dictionary` composition modes.
+  - Core Nom Module (E3): Implemented dual-phase engine (`Reading` & `Candidate` phases), exact & toneless lookups, and candidate pagination.
+  - FFI Layer (E4): Added `hc_session_handle_key_hannom` and `hc_nom_dict_status` to Rust C ABI & `hc_core_ffi.h`.
+  - Fcitx5 Addon Integration (E5): Extended `HcImeInputMode` enum (`HanNomTelex`, `HanNomVni`, `HanNomViqr`), wired `CommonCandidateList` UI, and updated status menu.
+  - Validation & Tests (E6): Added 116 Rust unit tests (stress test, Ext B+ safety, error fallback) and bridge probe test suite.
+  - Verification (E7): 100% test pass rate across `cargo test` and `./scripts/e2e-smoke.sh`.
+- TypingEngine extracted into `hc_core/src/compose.rs` with `CompositionMode` support (Inline and Dictionary modes).
+- Hán Nôm multi-source data pipeline is active: `scripts/build_nom_dict.rs` parses Unihan, NomStandardization, cake_gao, and pearapple123, producing a validated binary dictionary at `hc_core/data/han_nom_dict.bin` with 7,114 unique readings and 19,134 unique characters (14,297 Extension B+ Nôm characters).
 - Per-app output strategy overrides the global output mode: apps listed in
   `SurroundingTextApps` always use surrounding-text output, and apps listed in
   `PreeditApps` always use client preedit, regardless of the global setting.

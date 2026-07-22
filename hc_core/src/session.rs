@@ -4,12 +4,10 @@ use std::time::Instant;
 
 use crate::language::{is_viqr_trigger, language_scores};
 use crate::quick_consonants;
-use crate::transform::{
-    apply_breve, apply_circumflex, apply_d_stroke, apply_double_tap, apply_horn, apply_telex_w,
-    apply_tone,
+use crate::types::{
+    CommitDecision, EnglishProtectionLevel, HCSpellCheckStatus, HCStatusFlag, HC_CandidateChar,
+    HC_State, InputMode, NomPhase,
 };
-use crate::types::EnglishProtectionLevel;
-use crate::types::{CommitDecision, HCSpellCheckStatus, HCStatusFlag, HC_State, InputMode, Tone};
 use crate::vowel::strip_all_marks;
 
 pub const EDIT_TIMEOUT_MS: u128 = 1500;
@@ -38,6 +36,11 @@ pub struct Session {
     pub esc_restore_raw: bool,
     pub committed_raw_history: Vec<String>,
     pub quick_consonant_lock: usize,
+    pub nom_phase: NomPhase,
+    pub nom_candidates: Vec<char>,
+    pub candidate_page: usize,
+    pub reading_buffer: String,
+    pub ffi_candidates_buf: Vec<HC_CandidateChar>,
 }
 
 impl Session {
@@ -65,6 +68,11 @@ impl Session {
             esc_restore_raw: false,
             committed_raw_history: Vec::new(),
             quick_consonant_lock: 0,
+            nom_phase: NomPhase::Reading,
+            nom_candidates: Vec::new(),
+            candidate_page: 0,
+            reading_buffer: String::new(),
+            ffi_candidates_buf: Vec::new(),
         }
     }
 
@@ -81,6 +89,11 @@ impl Session {
         self.rendered_raw_len = 0;
         self.previous_rendered_raw_len = 0;
         self.quick_consonant_lock = 0;
+        self.nom_phase = NomPhase::Reading;
+        self.nom_candidates.clear();
+        self.candidate_page = 0;
+        self.reading_buffer.clear();
+        self.ffi_candidates_buf.clear();
     }
 
     pub fn render_from_raw(&mut self) {
@@ -88,16 +101,25 @@ impl Session {
         let raw_len = self.raw_buffer.len();
         if raw_len == self.rendered_raw_len + 1 {
             let last_char = self.raw_buffer.chars().last().unwrap();
-            if !apply_input_trigger(&mut self.buffer, self.mode, last_char, self.legacy_tone) {
+            if !crate::compose::TypingEngine::apply_trigger(
+                &mut self.buffer,
+                self.mode,
+                last_char,
+                self.legacy_tone,
+            ) {
                 self.buffer.push(last_char);
             }
         } else {
-            self.buffer = render_raw_input(&self.raw_buffer, self.mode, self.legacy_tone);
+            self.buffer = crate::compose::TypingEngine::render_raw(
+                &self.raw_buffer,
+                self.mode,
+                self.legacy_tone,
+            );
         }
         if self.quick_consonants_enabled {
             self.apply_quick_consonants();
         }
-        mirror_raw_casing(&self.raw_buffer, &mut self.buffer);
+        crate::compose::TypingEngine::mirror_raw_casing(&self.raw_buffer, &mut self.buffer);
         self.rendered_raw_len = self.raw_buffer.len();
         self.update_spell_check_status();
     }
@@ -111,7 +133,8 @@ impl Session {
             &mut self.raw_buffer,
             &mut self.quick_consonant_lock,
         );
-        self.buffer = render_raw_input(&self.raw_buffer, self.mode, self.legacy_tone);
+        self.buffer =
+            crate::compose::TypingEngine::render_raw(&self.raw_buffer, self.mode, self.legacy_tone);
     }
 
     pub fn apply_end_quick_consonants_if_enabled(&mut self) {
@@ -120,7 +143,11 @@ impl Session {
                 &mut self.raw_buffer,
                 &mut self.quick_consonant_lock,
             );
-            self.buffer = render_raw_input(&self.raw_buffer, self.mode, self.legacy_tone);
+            self.buffer = crate::compose::TypingEngine::render_raw(
+                &self.raw_buffer,
+                self.mode,
+                self.legacy_tone,
+            );
         }
     }
 
@@ -303,93 +330,11 @@ impl Session {
 }
 
 pub fn render_raw_input(raw: &str, mode: InputMode, legacy_tone: bool) -> String {
-    let mut rendered = String::new();
-    for ch in raw.chars() {
-        if !apply_input_trigger(&mut rendered, mode, ch, legacy_tone) {
-            rendered.push(ch);
-        }
-    }
-    rendered
+    crate::compose::TypingEngine::render_raw(raw, mode, legacy_tone)
 }
 
 pub fn vni_digit_transforms_buffer(buffer: &str, ch: char, legacy_tone: bool) -> bool {
-    if !ch.is_ascii_digit() {
-        return false;
-    }
-    let mut probe = buffer.to_string();
-    apply_vni_trigger(&mut probe, ch, legacy_tone)
-}
-
-fn apply_input_trigger(buffer: &mut String, mode: InputMode, ch: char, legacy_tone: bool) -> bool {
-    match mode {
-        InputMode::Telex => apply_telex_trigger(buffer, ch, legacy_tone),
-        InputMode::Vni => apply_vni_trigger(buffer, ch, legacy_tone),
-        InputMode::Viqr => apply_viqr_trigger(buffer, ch, legacy_tone),
-    }
-}
-
-fn apply_telex_trigger(buffer: &mut String, ch: char, legacy_tone: bool) -> bool {
-    match ch {
-        'z' | 'Z' => {
-            let stripped = strip_all_marks(buffer);
-            if stripped == buffer.as_str() {
-                false
-            } else {
-                *buffer = stripped;
-                true
-            }
-        }
-        's' | 'S' => apply_tone(buffer, Tone::Sac, legacy_tone),
-        'f' | 'F' => apply_tone(buffer, Tone::Huyen, legacy_tone),
-        'r' | 'R' => apply_tone(buffer, Tone::Hoi, legacy_tone),
-        'x' | 'X' => apply_tone(buffer, Tone::Nga, legacy_tone),
-        'j' | 'J' => apply_tone(buffer, Tone::Nang, legacy_tone),
-        'w' | 'W' => apply_telex_w(buffer),
-        'a' | 'A' => apply_double_tap(buffer, ch, |base| base == 'a'),
-        'e' | 'E' => apply_double_tap(buffer, ch, |base| base == 'e'),
-        'o' | 'O' => apply_double_tap(buffer, ch, |base| base == 'o'),
-        'd' | 'D' => apply_double_tap(buffer, ch, |base| base == 'd'),
-        _ => false,
-    }
-}
-
-fn apply_vni_trigger(buffer: &mut String, ch: char, legacy_tone: bool) -> bool {
-    match ch {
-        '0' => {
-            let stripped = strip_all_marks(buffer);
-            if stripped == buffer.as_str() {
-                false
-            } else {
-                *buffer = stripped;
-                true
-            }
-        }
-        '1' => apply_tone(buffer, Tone::Sac, legacy_tone),
-        '2' => apply_tone(buffer, Tone::Huyen, legacy_tone),
-        '3' => apply_tone(buffer, Tone::Hoi, legacy_tone),
-        '4' => apply_tone(buffer, Tone::Nga, legacy_tone),
-        '5' => apply_tone(buffer, Tone::Nang, legacy_tone),
-        '6' => apply_circumflex(buffer),
-        '7' => apply_horn(buffer),
-        '8' => apply_breve(buffer),
-        '9' => apply_d_stroke(buffer),
-        _ => false,
-    }
-}
-
-fn apply_viqr_trigger(buffer: &mut String, ch: char, legacy_tone: bool) -> bool {
-    match ch {
-        '\'' => apply_tone(buffer, Tone::Sac, legacy_tone),
-        '`' => apply_tone(buffer, Tone::Huyen, legacy_tone),
-        '?' => apply_tone(buffer, Tone::Hoi, legacy_tone),
-        '~' => apply_tone(buffer, Tone::Nga, legacy_tone),
-        '.' => apply_tone(buffer, Tone::Nang, legacy_tone),
-        '^' => apply_circumflex(buffer),
-        '+' => apply_horn(buffer),
-        '(' => apply_breve(buffer),
-        'd' | 'D' => apply_double_tap(buffer, ch, |base| base == 'd'),
-        _ => false,
-    }
+    crate::compose::TypingEngine::vni_digit_transforms_buffer(buffer, ch, legacy_tone)
 }
 
 pub fn resolve_commit_text(
@@ -425,32 +370,6 @@ pub fn resolve_commit_text(
         CommitDecision {
             text: rendered.to_string(),
             status: HCStatusFlag::Commit,
-        }
-    }
-}
-
-fn mirror_raw_casing(raw: &str, rendered: &mut String) {
-    let raw_alphas: Vec<char> = raw.chars().filter(|ch| ch.is_ascii_alphabetic()).collect();
-    if raw_alphas.len() < 2 {
-        return;
-    }
-
-    let upper_count = raw_alphas.iter().filter(|ch| ch.is_uppercase()).count();
-    let lower_count = raw_alphas.iter().filter(|ch| ch.is_lowercase()).count();
-
-    if upper_count >= 2 && lower_count == 0 {
-        *rendered = rendered.to_uppercase();
-    } else if upper_count == 1
-        && raw_alphas[0].is_uppercase()
-        && raw_alphas[1..].iter().all(|ch| ch.is_lowercase())
-    {
-        let mut chars = rendered.chars();
-        if let Some(first) = chars.next() {
-            let mut result: String = first.to_uppercase().collect();
-            for ch in chars {
-                result.extend(ch.to_lowercase());
-            }
-            *rendered = result;
         }
     }
 }

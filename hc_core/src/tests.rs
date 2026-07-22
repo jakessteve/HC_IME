@@ -2080,3 +2080,674 @@ fn vni_does_not_cross_contaminate_with_telex_triggers() {
 
     hc_session_free(session);
 }
+
+#[test]
+fn vni_digit_after_space_auto_reopens_commit_within_timeout() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+
+    // Type "khong" and commit with space
+    assert_eq!(type_raw(session, &mut req, "khong"), "khong");
+    let (committed, status) = commit_with_space(session, &mut req);
+    assert_eq!(committed, "khong");
+    assert_eq!(status, HCStatusFlag::Commit as i32);
+
+    // Immediately type "6" (circumflex) without backspace
+    // This should auto-reopen the last commit and apply circumflex
+    req.kind = HCKeyKind::Printable as i32;
+    let six = c("6");
+    req.text = six.as_ptr();
+    let edit = hc_session_handle_key(session, &req);
+    assert_eq!(edit.state.status_flag, HCStatusFlag::InProgress as i32);
+    assert_eq!(read_and_free(edit.state), "không");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn vni_digit_after_space_does_not_reopen_after_timeout() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+
+    // Type "khong" and commit with space
+    assert_eq!(type_raw(session, &mut req, "khong"), "khong");
+    let (committed, status) = commit_with_space(session, &mut req);
+    assert_eq!(committed, "khong");
+    assert_eq!(status, HCStatusFlag::Commit as i32);
+
+    // Wait for edit window to expire
+    std::thread::sleep(Duration::from_millis(1600));
+
+    // Type "6" - should NOT reopen, should be unhandled
+    req.kind = HCKeyKind::Printable as i32;
+    let six = c("6");
+    req.text = six.as_ptr();
+    let edit = hc_session_handle_key(session, &req);
+    assert_eq!(edit.handled, 0, "digit after timeout should not be handled");
+    free_state(edit.state);
+
+    hc_session_free(session);
+}
+
+#[test]
+fn vni_tone_digit_does_not_reopen_toned_word() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+
+    // Type "tuan2" to get "tuần" (with circumflex and Huyền tone)
+    assert_eq!(type_raw(session, &mut req, "tuan2"), "tuần");
+
+    // Commit with space
+    req.kind = HCKeyKind::Space as i32;
+    let (committed, status) = send_key(session, &mut req, HCKeyKind::Space, " ");
+    assert_eq!(committed, "tuần");
+    assert_eq!(status, HCStatusFlag::Commit as i32);
+
+    // Immediately type "1" (tone Sac) - should NOT reopen because word already has tone
+    req.kind = HCKeyKind::Printable as i32;
+    let one = c("1");
+    req.text = one.as_ptr();
+    let edit = hc_session_handle_key(session, &req);
+    assert_eq!(edit.handled, 0, "tone digit should not reopen toned word");
+    free_state(edit.state);
+
+    hc_session_free(session);
+}
+
+#[test]
+fn vni_tone_digit_reopens_untone_word() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+
+    // Type "khong" and commit with space (no tone)
+    assert_eq!(type_raw(session, &mut req, "khong"), "khong");
+    let (committed, status) = commit_with_space(session, &mut req);
+    assert_eq!(committed, "khong");
+    assert_eq!(status, HCStatusFlag::Commit as i32);
+
+    // Immediately type "1" (tone Sac) - should reopen and apply tone
+    req.kind = HCKeyKind::Printable as i32;
+    let one = c("1");
+    req.text = one.as_ptr();
+    let edit = hc_session_handle_key(session, &req);
+    assert_eq!(edit.state.status_flag, HCStatusFlag::InProgress as i32);
+    assert_eq!(read_and_free(edit.state), "khóng");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn mode_cycling_100_times_is_safe() {
+    let modes = [
+        InputMode::Telex,
+        InputMode::Vni,
+        InputMode::Viqr,
+        InputMode::HanNomTelex,
+        InputMode::HanNomVni,
+        InputMode::HanNomViqr,
+    ];
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+
+    for i in 0..100 {
+        let mode = modes[i % modes.len()];
+        let mut req = key_request(mode);
+        let sample = match mode {
+            InputMode::Telex | InputMode::HanNomTelex => "viet",
+            InputMode::Vni | InputMode::HanNomVni => "viet6",
+            InputMode::Viqr | InputMode::HanNomViqr => "viet^",
+        };
+        type_raw(session, &mut req, sample);
+        hc_session_reset(session);
+    }
+
+    hc_session_free(session);
+}
+
+#[test]
+fn han_nom_lookup_exact_and_toneless_fallback() {
+    let dict = crate::han_nom::get_global_dict().unwrap();
+    let candidates = dict.lookup("thiên");
+    assert!(
+        !candidates.is_empty(),
+        "thiên lookup should return candidates"
+    );
+    assert!(candidates.contains(&'天'), "thiên must contain 天");
+
+    let toneless = dict.lookup("thien");
+    assert!(
+        !toneless.is_empty(),
+        "thien toneless fallback should return candidates"
+    );
+}
+
+#[test]
+fn han_nom_telex_flow_space_opens_candidates_digit_selects() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut res: HC_HanNomResult = unsafe { std::mem::zeroed() };
+
+    // Type "thien"
+    for ch in "thien".chars() {
+        let s = ch.to_string();
+        let c_str = c(&s);
+        req.text = c_str.as_ptr();
+        hc_session_handle_key_hannom(session, &req, &mut res);
+    }
+    assert_eq!(res.handled, 1);
+
+    // Space -> lookup and open candidates
+    let space = c(" ");
+    req.kind = HCKeyKind::Space as i32;
+    req.text = space.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+    assert_eq!(res.status_flag, HCStatusFlag::InProgress as i32);
+    assert!(res.candidate_count > 0, "space should populate candidates");
+
+    // Digit 1 -> select first candidate
+    let one = c("1");
+    req.kind = HCKeyKind::Printable as i32;
+    req.text = one.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+    assert_eq!(res.status_flag, HCStatusFlag::Commit as i32);
+    assert_eq!(res.handled, 1);
+
+    hc_session_free(session);
+}
+
+#[test]
+fn han_nom_vni_digit_transforms_in_phase_a() {
+    let session = hc_session_new(InputMode::HanNomVni as i32, 0);
+    let mut req = key_request(InputMode::HanNomVni);
+    let mut res: HC_HanNomResult = unsafe { std::mem::zeroed() };
+
+    // Type "thien6" (VNI circumflex)
+    for ch in "thien6".chars() {
+        let s = ch.to_string();
+        let c_str = c(&s);
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = c_str.as_ptr();
+        hc_session_handle_key_hannom(session, &req, &mut res);
+    }
+
+    let reading = std::str::from_utf8(&res.reading[..res.reading_len as usize]).unwrap();
+    assert_eq!(reading, "thiên");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn han_nom_1000_keystrokes_stress_test_mode_cycling() {
+    let modes = [
+        InputMode::Telex,
+        InputMode::Vni,
+        InputMode::Viqr,
+        InputMode::HanNomTelex,
+        InputMode::HanNomVni,
+        InputMode::HanNomViqr,
+    ];
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut res: HC_HanNomResult = unsafe { std::mem::zeroed() };
+
+    for i in 0..1000 {
+        let mode = modes[i % modes.len()];
+        req.input_mode = mode as i32;
+        let s = match i % 4 {
+            0 => "a",
+            1 => "1",
+            2 => " ",
+            _ => "s",
+        };
+        let c_str = c(s);
+        req.kind = if s == " " {
+            HCKeyKind::Space as i32
+        } else {
+            HCKeyKind::Printable as i32
+        };
+        req.text = c_str.as_ptr();
+
+        if mode as i32 >= 3 {
+            hc_session_handle_key_hannom(session, &req, &mut res);
+        } else {
+            hc_session_handle_key(session, &req);
+        }
+
+        if i % 50 == 0 {
+            hc_session_reset(session);
+        }
+    }
+
+    hc_session_free(session);
+}
+
+#[test]
+fn cjk_ext_b_plus_utf8_rendering_safety() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut res: HC_HanNomResult = unsafe { std::mem::zeroed() };
+
+    for ch in "truong".chars() {
+        let s = ch.to_string();
+        let c_str = c(&s);
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = c_str.as_ptr();
+        hc_session_handle_key_hannom(session, &req, &mut res);
+    }
+
+    let space = c(" ");
+    req.kind = HCKeyKind::Space as i32;
+    req.text = space.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+
+    if res.candidate_count > 0 && !res.candidates.is_null() {
+        unsafe {
+            let candidates =
+                std::slice::from_raw_parts(res.candidates, res.candidate_count as usize);
+            for cand in candidates {
+                assert!(cand.byte_len <= 4, "UTF-8 byte len must be <= 4");
+                let s = std::str::from_utf8(&cand.utf8[..cand.byte_len as usize]);
+                assert!(s.is_ok(), "Candidate UTF-8 must be valid");
+            }
+        }
+    }
+
+    hc_session_free(session);
+}
+
+#[test]
+fn missing_and_empty_dictionary_fallback_safety() {
+    let dict = crate::han_nom::EmbeddedNomDict::from_binary(&[]).unwrap_err();
+    assert_eq!(dict, crate::han_nom::DictError::Corrupted);
+
+    let invalid_magic =
+        crate::han_nom::EmbeddedNomDict::from_binary(b"INVALID_HEADER_DATA").unwrap_err();
+    assert_eq!(invalid_magic, crate::han_nom::DictError::InvalidMagic);
+}
+
+#[test]
+fn han_nom_dict_status_check() {
+    let status = hc_nom_dict_status(std::ptr::null_mut());
+    assert_eq!(status, 0, "dict status should be 0 (ok)");
+}
+
+// ── Hán Nôm edge-case regression suite ──
+
+#[test]
+fn hannom_empty_buffer_space_passthrough() {
+    // Space on empty buffer must NOT be handled (passthrough to app)
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut res: HC_HanNomResult = unsafe { std::mem::zeroed() };
+
+    let space = c(" ");
+    req.kind = HCKeyKind::Space as i32;
+    req.text = space.as_ptr();
+    let handled = hc_session_handle_key_hannom(session, &req, &mut res);
+    assert_eq!(
+        handled, 0,
+        "space on empty buffer must return 0 (passthrough)"
+    );
+    assert_eq!(res.handled, 0);
+
+    hc_session_free(session);
+}
+
+#[test]
+fn hannom_backspace_on_empty_buffer_still_handled() {
+    // Backspace on empty buffer should still be "handled" to prevent passthrough
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut res: HC_HanNomResult = unsafe { std::mem::zeroed() };
+
+    let bs = c("");
+    req.kind = HCKeyKind::Backspace as i32;
+    req.text = bs.as_ptr();
+    let handled = hc_session_handle_key_hannom(session, &req, &mut res);
+    assert_eq!(handled, 1, "backspace on empty buffer is handled");
+    assert_eq!(res.handled, 1);
+    assert_eq!(
+        res.reading_len, 0,
+        "reading should be empty after backspace on empty"
+    );
+
+    hc_session_free(session);
+}
+
+#[test]
+fn hannom_escape_from_candidate_returns_to_reading_with_preedit() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut res: HC_HanNomResult = unsafe { std::mem::zeroed() };
+
+    // Type "thieen" (Telex → thiên)
+    for ch in "thieen".chars() {
+        let s = ch.to_string();
+        let c_str = c(&s);
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = c_str.as_ptr();
+        hc_session_handle_key_hannom(session, &req, &mut res);
+    }
+
+    // Space → candidate phase
+    let space = c(" ");
+    req.kind = HCKeyKind::Space as i32;
+    req.text = space.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+    assert!(res.candidate_count > 0, "should have candidates");
+
+    // Escape → back to reading phase, preedit preserved
+    let esc = c("");
+    req.kind = HCKeyKind::Escape as i32;
+    req.text = esc.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+    assert_eq!(res.handled, 1);
+    assert_eq!(res.candidate_count, 0, "candidates cleared after escape");
+    let reading = std::str::from_utf8(&res.reading[..res.reading_len as usize]).unwrap();
+    assert_eq!(
+        reading, "thiên",
+        "reading preserved after escape from candidates"
+    );
+
+    hc_session_free(session);
+}
+
+#[test]
+fn hannom_escape_from_reading_clears_all() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut res: HC_HanNomResult = unsafe { std::mem::zeroed() };
+
+    // Type "abc"
+    for ch in "abc".chars() {
+        let s = ch.to_string();
+        let c_str = c(&s);
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = c_str.as_ptr();
+        hc_session_handle_key_hannom(session, &req, &mut res);
+    }
+    assert!(res.reading_len > 0, "should have reading");
+
+    // Escape → clear everything
+    let esc = c("");
+    req.kind = HCKeyKind::Escape as i32;
+    req.text = esc.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+    assert_eq!(res.handled, 1);
+    assert_eq!(res.reading_len, 0, "reading cleared after escape");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn hannom_phase_b_nondigit_printable_falls_to_phase_a() {
+    // In candidate phase, pressing a letter should close candidates and
+    // start a new reading with that letter
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut res: HC_HanNomResult = unsafe { std::mem::zeroed() };
+
+    // Type "thieen" + space → candidates
+    for ch in "thieen".chars() {
+        let s = ch.to_string();
+        let c_str = c(&s);
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = c_str.as_ptr();
+        hc_session_handle_key_hannom(session, &req, &mut res);
+    }
+    let space = c(" ");
+    req.kind = HCKeyKind::Space as i32;
+    req.text = space.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+    assert!(res.candidate_count > 0);
+
+    // Press 'a' → should close candidates and enter 'a' into Phase A
+    let a = c("a");
+    req.kind = HCKeyKind::Printable as i32;
+    req.text = a.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+    assert_eq!(res.handled, 1);
+    // The letter 'a' should be appended to the existing buffer (since
+    // we switched from Phase B to Phase A and the buffer was still 'thiên')
+    let reading = std::str::from_utf8(&res.reading[..res.reading_len as usize]).unwrap();
+    assert!(
+        reading.len() > 0,
+        "reading should not be empty after letter in candidate phase"
+    );
+
+    hc_session_free(session);
+}
+
+#[test]
+fn hannom_viqr_mode_basic_composition() {
+    let session = hc_session_new(InputMode::HanNomViqr as i32, 0);
+    let mut req = key_request(InputMode::HanNomViqr);
+    let mut res: HC_HanNomResult = unsafe { std::mem::zeroed() };
+
+    // In VIQR Hán Nôm mode, digits should be passthrough (not VNI triggers)
+    let a = c("a");
+    req.kind = HCKeyKind::Printable as i32;
+    req.text = a.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+    assert_eq!(res.handled, 1);
+
+    // Digit '1' in VIQR mode → should passthrough (not handled)
+    let one = c("1");
+    req.kind = HCKeyKind::Printable as i32;
+    req.text = one.as_ptr();
+    let handled = hc_session_handle_key_hannom(session, &req, &mut res);
+    assert_eq!(handled, 0, "digits in VIQR Hán Nôm mode should passthrough");
+    assert_eq!(res.handled, 0);
+
+    hc_session_free(session);
+}
+
+#[test]
+fn hannom_no_match_space_commits_quoc_ngu_reading() {
+    // When no Nôm candidates found for reading, Space should commit the quốc ngữ text
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut res: HC_HanNomResult = unsafe { std::mem::zeroed() };
+
+    // Type "zzzzz" (nonsense reading)
+    for ch in "zzzzz".chars() {
+        let s = ch.to_string();
+        let c_str = c(&s);
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = c_str.as_ptr();
+        hc_session_handle_key_hannom(session, &req, &mut res);
+    }
+
+    let space = c(" ");
+    req.kind = HCKeyKind::Space as i32;
+    req.text = space.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+    assert_eq!(
+        res.status_flag,
+        HCStatusFlag::Commit as i32,
+        "no-match reading should commit"
+    );
+    assert_eq!(res.handled, 1);
+    let committed = std::str::from_utf8(&res.reading[..res.reading_len as usize]).unwrap();
+    assert_eq!(
+        committed, "zzzzz",
+        "committed text should be the composed reading"
+    );
+
+    hc_session_free(session);
+}
+
+#[test]
+fn hannom_candidate_digit_out_of_range_stays_in_phase_b() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut res: HC_HanNomResult = unsafe { std::mem::zeroed() };
+
+    // Type "thieen" + space → candidates
+    for ch in "thieen".chars() {
+        let s = ch.to_string();
+        let c_str = c(&s);
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = c_str.as_ptr();
+        hc_session_handle_key_hannom(session, &req, &mut res);
+    }
+    let space = c(" ");
+    req.kind = HCKeyKind::Space as i32;
+    req.text = space.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+    let count = res.candidate_count;
+    assert!(count > 0);
+
+    // Press '9' — if there are fewer than 9 candidates, should stay in Phase B
+    if count < 9 {
+        let nine = c("9");
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = nine.as_ptr();
+        hc_session_handle_key_hannom(session, &req, &mut res);
+        assert_eq!(res.handled, 1, "out-of-range digit should still be handled");
+        // Should still show candidates (populate_nom_result called)
+    }
+
+    hc_session_free(session);
+}
+
+#[test]
+fn hannom_backspace_single_char_reading_clears_preedit() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut res: HC_HanNomResult = unsafe { std::mem::zeroed() };
+
+    // Type single char "a"
+    let a = c("a");
+    req.kind = HCKeyKind::Printable as i32;
+    req.text = a.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+    assert_eq!(res.reading_len, 1);
+
+    // Backspace → empty
+    let bs = c("");
+    req.kind = HCKeyKind::Backspace as i32;
+    req.text = bs.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+    assert_eq!(res.handled, 1);
+    assert_eq!(
+        res.reading_len, 0,
+        "reading empty after backspace on single char"
+    );
+
+    hc_session_free(session);
+}
+
+#[test]
+fn hannom_telex_tone_markers_compose_during_reading() {
+    // Telex triggers (s, f, r, x, j) should transform the buffer during reading
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut res: HC_HanNomResult = unsafe { std::mem::zeroed() };
+
+    // Type "has" → should compose "hás" (acute on a)
+    for ch in "has".chars() {
+        let s = ch.to_string();
+        let c_str = c(&s);
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = c_str.as_ptr();
+        hc_session_handle_key_hannom(session, &req, &mut res);
+    }
+    let reading = std::str::from_utf8(&res.reading[..res.reading_len as usize]).unwrap();
+    assert_eq!(
+        reading, "há",
+        "Telex 's' should apply acute tone during reading (consumed as trigger)"
+    );
+
+    hc_session_free(session);
+}
+
+#[test]
+fn hannom_rapid_mode_switch_mid_composition() {
+    // Switching from Telex to VNI mid-composition should not crash
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut res: HC_HanNomResult = unsafe { std::mem::zeroed() };
+
+    // Type "th" in Telex
+    for ch in "th".chars() {
+        let s = ch.to_string();
+        let c_str = c(&s);
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = c_str.as_ptr();
+        hc_session_handle_key_hannom(session, &req, &mut res);
+    }
+
+    // Switch to VNI mid-composition
+    req.input_mode = InputMode::HanNomVni as i32;
+    let i = c("i");
+    req.text = i.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+    assert_eq!(res.handled, 1);
+
+    // VNI digit should now apply VNI transform
+    let six = c("6");
+    req.text = six.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+    assert_eq!(
+        res.handled, 1,
+        "VNI digit should be handled after mode switch"
+    );
+
+    hc_session_free(session);
+}
+
+#[test]
+fn hannom_64_char_buffer_cap_enforced() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut res: HC_HanNomResult = unsafe { std::mem::zeroed() };
+
+    // Type 70 characters — should cap at 64
+    for _ in 0..70 {
+        let a = c("a");
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = a.as_ptr();
+        hc_session_handle_key_hannom(session, &req, &mut res);
+    }
+    let reading = std::str::from_utf8(&res.reading[..res.reading_len as usize]).unwrap();
+    assert!(reading.len() <= 64, "reading should be capped at 64 bytes");
+
+    hc_session_free(session);
+}
+
+#[test]
+fn hannom_backspace_in_candidate_phase_returns_to_reading_minus_one() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut res: HC_HanNomResult = unsafe { std::mem::zeroed() };
+
+    // Type "thieen" + space → candidates
+    for ch in "thieen".chars() {
+        let s = ch.to_string();
+        let c_str = c(&s);
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = c_str.as_ptr();
+        hc_session_handle_key_hannom(session, &req, &mut res);
+    }
+    let space = c(" ");
+    req.kind = HCKeyKind::Space as i32;
+    req.text = space.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+    assert!(res.candidate_count > 0);
+
+    // Backspace → should return to reading with last raw char removed
+    let bs = c("");
+    req.kind = HCKeyKind::Backspace as i32;
+    req.text = bs.as_ptr();
+    hc_session_handle_key_hannom(session, &req, &mut res);
+    assert_eq!(res.handled, 1);
+    assert_eq!(res.candidate_count, 0, "backspace should close candidates");
+    let reading = std::str::from_utf8(&res.reading[..res.reading_len as usize]).unwrap();
+    // "thieen" minus last char → "thiee" which renders as "thiê"
+    assert_eq!(
+        reading, "thiê",
+        "backspace from candidates should remove last raw char and re-render"
+    );
+
+    hc_session_free(session);
+}

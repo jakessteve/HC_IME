@@ -98,10 +98,31 @@ enum HC_KeyKind {
     HC_KEY_UNDO = 7,
 };
 
+typedef struct HC_CandidateChar {
+    uint8_t utf8[5];
+    uint8_t byte_len;
+} HC_CandidateChar;
+
+typedef struct HC_HanNomResult {
+    int32_t status_flag;
+    int32_t error_code;
+    char reading[256];
+    uint16_t reading_len;
+    const HC_CandidateChar* candidates;
+    uint16_t candidate_count;
+    uint16_t page;
+    uint16_t total_candidates;
+    uint8_t has_more;
+    uint8_t handled;
+} HC_HanNomResult;
+
 enum HC_InputMode {
     HC_INPUT_TELEX = 0,
     HC_INPUT_VNI = 1,
     HC_INPUT_VIQR = 2,
+    HC_INPUT_HAN_NOM_TELEX = 3,
+    HC_INPUT_HAN_NOM_VNI = 4,
+    HC_INPUT_HAN_NOM_VIQR = 5,
 };
 
 HC_State hc_compose_with_request(const HC_ComposeRequest* request);
@@ -132,6 +153,8 @@ void hc_session_add_macro(void* session, const char* key, const char* value);
 void hc_session_clear_macros(void* session);
 HC_KeyResult hc_session_handle_key(void* session, const HC_KeyRequest* request);
 HC_Utf8KeyResult hc_session_handle_key_utf8(void* session, const HC_KeyRequest* request);
+int32_t hc_session_handle_key_hannom(void* session, const HC_KeyRequest* request, HC_HanNomResult* result);
+int32_t hc_nom_dict_status(void* session);
 
 #ifdef __cplusplus
 }
