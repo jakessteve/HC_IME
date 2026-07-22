@@ -503,25 +503,51 @@ public:
         }
 
         if (mode >= 3 && mode <= 5 && state.hasActivePreedit) {
-            if (event.key().check(FcitxKey_Page_Down) || event.key().check(FcitxKey_KP_Page_Down) ||
-                event.key().check(FcitxKey_Next) || event.key().check(FcitxKey_KP_Next) ||
-                event.key().check(FcitxKey_Down) || event.key().check(FcitxKey_KP_Down)) {
+            auto* ic = event.inputContext();
+            auto candListPtr = ic->inputPanel().candidateList();
+            auto* candidateList = candListPtr ? dynamic_cast<CommonCandidateList*>(candListPtr.get()) : nullptr;
+
+            if (event.key().check(FcitxKey_Down) || event.key().check(FcitxKey_KP_Down) ||
+                event.key().check(FcitxKey_Right) || event.key().check(FcitxKey_KP_Right) ||
+                event.key().check(FcitxKey_Tab)) {
+                if (candidateList != nullptr && candidateList->size() > 0) {
+                    candidateList->nextCandidate();
+                    ic->updateUserInterface(UserInterfaceComponent::InputPanel, true);
+                    event.filterAndAccept();
+                    return;
+                }
+            } else if (event.key().check(FcitxKey_Up) || event.key().check(FcitxKey_KP_Up) ||
+                       event.key().check(FcitxKey_Left) || event.key().check(FcitxKey_KP_Left) ||
+                       event.key().check(FcitxKey_ISO_Left_Tab)) {
+                if (candidateList != nullptr && candidateList->size() > 0) {
+                    candidateList->prevCandidate();
+                    ic->updateUserInterface(UserInterfaceComponent::InputPanel, true);
+                    event.filterAndAccept();
+                    return;
+                }
+            } else if (event.key().check(FcitxKey_Page_Down) || event.key().check(FcitxKey_KP_Page_Down) ||
+                       event.key().check(FcitxKey_Next) || event.key().check(FcitxKey_KP_Next)) {
                 auto navRequest = makeKeyRequest(HC_KEY_PRINTABLE, "=", mode);
                 HC_HanNomResult nomResult;
                 std::memset(&nomResult, 0, sizeof(nomResult));
                 if (hc_session_handle_key_hannom(state.session.ptr, &navRequest, &nomResult) != 0) {
-                    updateHanNomUi(event.inputContext(), state, nomResult, useSurroundingText);
+                    updateHanNomUi(ic, state, nomResult, useSurroundingText);
                     event.filterAndAccept();
                     return;
                 }
             } else if (event.key().check(FcitxKey_Page_Up) || event.key().check(FcitxKey_KP_Page_Up) ||
-                       event.key().check(FcitxKey_Prior) || event.key().check(FcitxKey_KP_Prior) ||
-                       event.key().check(FcitxKey_Up) || event.key().check(FcitxKey_KP_Up)) {
+                       event.key().check(FcitxKey_Prior) || event.key().check(FcitxKey_KP_Prior)) {
                 auto navRequest = makeKeyRequest(HC_KEY_PRINTABLE, "-", mode);
                 HC_HanNomResult nomResult;
                 std::memset(&nomResult, 0, sizeof(nomResult));
                 if (hc_session_handle_key_hannom(state.session.ptr, &navRequest, &nomResult) != 0) {
-                    updateHanNomUi(event.inputContext(), state, nomResult, useSurroundingText);
+                    updateHanNomUi(ic, state, nomResult, useSurroundingText);
+                    event.filterAndAccept();
+                    return;
+                }
+            } else if (event.key().check(FcitxKey_Return) || event.key().check(FcitxKey_KP_Enter)) {
+                if (candidateList != nullptr && candidateList->cursorIndex() >= 0 && candidateList->cursorIndex() < candidateList->size()) {
+                    selectHanNomCandidate(ic, candidateList->cursorIndex());
                     event.filterAndAccept();
                     return;
                 }
@@ -885,36 +911,31 @@ private:
             std::string output(nomResult.reading, nomResult.reading_len);
             state.lastCommitTrailingChars = 0;
             state.hasActivePreedit = !output.empty();
-            if (output.empty()) {
-                clearPreedit(ic);
-                ic->inputPanel().setCandidateList(nullptr);
+            if (nomResult.candidate_count > 0 && nomResult.candidates != nullptr) {
+                auto candidateList = std::make_unique<CommonCandidateList>();
+                candidateList->setLabels({"1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9."});
+                candidateList->setPageSize(9);
+                candidateList->setLayoutHint(CandidateLayoutHint::NotSet);
+                std::string readingStr(nomResult.reading, nomResult.reading_len);
+
+                for (uint16_t i = 0; i < nomResult.candidate_count; ++i) {
+                    std::string candStr(reinterpret_cast<const char*>(nomResult.candidates[i].utf8), nomResult.candidates[i].byte_len);
+                    Text wordText(candStr);
+                    Text commentText(!readingStr.empty() ? readingStr : "");
+                    candidateList->append<HcNomCandidateWord>(wordText, commentText, i, this);
+                }
+                ic->inputPanel().setCandidateList(std::move(candidateList));
             } else {
-                if (useSurroundingText && state.hasActivePreedit) {
-                    applySurroundingTextPreedit(ic, state, output);
-                } else {
-                    setPreedit(ic, output, *config_.behavior->displayUnderline, 0);
-                }
-
-                if (nomResult.candidate_count > 0 && nomResult.candidates != nullptr) {
-                    auto candidateList = std::make_unique<CommonCandidateList>();
-                    candidateList->setLabels({"1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9."});
-                    candidateList->setPageSize(9);
-                    candidateList->setLayoutHint(CandidateLayoutHint::NotSet);
-
-                    std::string readingStr(nomResult.reading, nomResult.reading_len);
-
-                    for (uint16_t i = 0; i < nomResult.candidate_count; ++i) {
-                        std::string candStr(reinterpret_cast<const char*>(nomResult.candidates[i].utf8), nomResult.candidates[i].byte_len);
-                        Text wordText(candStr);
-                        Text commentText(!readingStr.empty() ? readingStr : "");
-                        candidateList->append<HcNomCandidateWord>(wordText, commentText, i, this);
-                    }
-                    ic->inputPanel().setCandidateList(std::move(candidateList));
-                } else {
-                    ic->inputPanel().setCandidateList(nullptr);
-                }
+                ic->inputPanel().setCandidateList(nullptr);
             }
+
             ic->updateUserInterface(UserInterfaceComponent::InputPanel, true);
+
+            if (useSurroundingText && state.hasActivePreedit) {
+                applySurroundingTextPreedit(ic, state, output);
+            } else {
+                setPreedit(ic, output, *config_.behavior->displayUnderline, 0);
+            }
         }
     }
 
