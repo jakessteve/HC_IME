@@ -420,6 +420,10 @@ int main() {
         require(ic.inputPanel().candidateList() != nullptr, "HanNom space populates candidateList");
         require(ic.inputPanel().candidateList()->size() > 0, "HanNom candidateList is non-empty");
 
+        // Test candidate navigation keys
+        require(send(engine, entry, ic, FcitxKey_Page_Down), "HanNom PageDown accepted for candidate list");
+        require(send(engine, entry, ic, FcitxKey_Page_Up), "HanNom PageUp accepted for candidate list");
+
         require(send(engine, entry, ic, FcitxKey_1), "HanNom digit 1 accepted");
         require(ic.commits.size() == 1, "HanNom digit 1 commits selected character");
         require(ic.inputPanel().candidateList() == nullptr, "HanNom selection clears candidateList");
