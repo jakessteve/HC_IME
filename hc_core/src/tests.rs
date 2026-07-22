@@ -2255,6 +2255,39 @@ fn han_nom_telex_flow_space_opens_candidates_digit_selects() {
 }
 
 #[test]
+fn han_nom_telex_live_reading_populates_candidates_before_space() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut res: HC_HanNomResult = unsafe { std::mem::zeroed() };
+
+    for ch in "thieen".chars() {
+        let s = ch.to_string();
+        let c_str = c(&s);
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = c_str.as_ptr();
+        hc_session_handle_key_hannom(session, &req, &mut res);
+    }
+
+    let reading = std::str::from_utf8(&res.reading[..res.reading_len as usize]).unwrap();
+    assert_eq!(reading, "thiên");
+    assert_eq!(res.status_flag, HCStatusFlag::InProgress as i32);
+    assert!(
+        res.candidate_count > 0,
+        "completed reading should expose live Nôm candidates before Space"
+    );
+    assert!(
+        !res.candidates.is_null(),
+        "live candidate pointer should be populated before Space"
+    );
+    assert!(
+        res.total_candidates >= res.candidate_count,
+        "total candidate count should include the visible page"
+    );
+
+    hc_session_free(session);
+}
+
+#[test]
 fn han_nom_vni_digit_transforms_in_phase_a() {
     let session = hc_session_new(InputMode::HanNomVni as i32, 0);
     let mut req = key_request(InputMode::HanNomVni);

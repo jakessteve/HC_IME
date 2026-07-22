@@ -93,6 +93,10 @@ static bool send(hcime::HcImeEngine& engine, const InputMethodEntry& entry, Mock
     return event.accepted() && event.filtered();
 }
 
+static std::string candidateText(const CandidateList& candidates, int index) {
+    return candidates.candidate(index).text().toString();
+}
+
 static std::vector<Action*> hcimeStatusActions(MockInputContext& ic) {
     return ic.statusArea().actions(StatusGroup::InputMethod);
 }
@@ -408,24 +412,100 @@ int main() {
         engine.setConfig(config);
         require(engine.subMode(entry, ic) == "Hán Nôm (Telex)", "mode switches to Hán Nôm (Telex)");
 
-        require(send(engine, entry, ic, FcitxKey_t), "HanNom t accepted");
-        require(send(engine, entry, ic, FcitxKey_h), "HanNom h accepted");
-        require(send(engine, entry, ic, FcitxKey_i), "HanNom i accepted");
-        require(send(engine, entry, ic, FcitxKey_e), "HanNom e1 accepted");
-        require(send(engine, entry, ic, FcitxKey_e), "HanNom e2 accepted");
-        require(send(engine, entry, ic, FcitxKey_n), "HanNom n accepted");
-        require(ic.inputPanel().clientPreedit().toString() == "thiên", "HanNom Telex composes reading thiên");
+        require(send(engine, entry, ic, FcitxKey_t), "HanNom 1 t accepted");
+        require(send(engine, entry, ic, FcitxKey_h), "HanNom 2 h accepted");
+        require(send(engine, entry, ic, FcitxKey_i), "HanNom 3 i accepted");
+        require(send(engine, entry, ic, FcitxKey_e), "HanNom 4 e1 accepted");
+        require(send(engine, entry, ic, FcitxKey_e), "HanNom 5 e2 accepted");
+        require(send(engine, entry, ic, FcitxKey_n), "HanNom 6 n accepted");
+        require(ic.inputPanel().clientPreedit().toString() == "thiên", "HanNom 7 Telex composes reading thiên");
+        require(ic.inputPanel().candidateList() != nullptr, "HanNom live reading populates candidateList before Space");
+        require(ic.inputPanel().candidateList()->size() > 0, "HanNom live reading candidateList is non-empty before Space");
+
+        require(send(engine, entry, ic, FcitxKey_Return), "HanNom raw Enter without highlight accepted");
+        require(ic.commits.size() == 1 && ic.commits.back() == "thiên", "HanNom raw Enter without highlight commits reading");
+        require(ic.inputPanel().candidateList() == nullptr, "HanNom raw Enter clears candidateList");
+        require(ic.inputPanel().clientPreedit().toString().empty(), "HanNom raw Enter clears preedit");
+    }
+
+    {
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        ic.setCapabilityFlags(CapabilityFlags(CapabilityFlag::SurroundingText));
+        ic.surroundingText().setText("prefix", 6, 6);
+        ic.updateSurroundingText();
+
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        RawConfig config;
+        config.setValueByPath("InputMethod", "HanNomTelex");
+        config.setValueByPath("Output/OutputMode", "SurroundingText");
+        engine.setConfig(config);
+
+        require(send(engine, entry, ic, FcitxKey_t), "HanNom surrounding raw Enter t accepted");
+        require(send(engine, entry, ic, FcitxKey_h), "HanNom surrounding raw Enter h accepted");
+        require(send(engine, entry, ic, FcitxKey_i), "HanNom surrounding raw Enter i accepted");
+        require(send(engine, entry, ic, FcitxKey_e), "HanNom surrounding raw Enter e1 accepted");
+        require(send(engine, entry, ic, FcitxKey_e), "HanNom surrounding raw Enter e2 accepted");
+        require(send(engine, entry, ic, FcitxKey_n), "HanNom surrounding raw Enter n accepted");
+        require(ic.inputPanel().clientPreedit().toString().empty(), "HanNom surrounding mode keeps client preedit empty");
+        require(ic.inputPanel().candidateList() != nullptr, "HanNom surrounding live candidateList exists before Space");
+        require(ic.inputPanel().candidateList()->size() > 0, "HanNom surrounding live candidateList is non-empty");
+        require(ic.inputPanel().candidateList()->cursorIndex() == -1, "HanNom surrounding raw Enter starts with no highlight");
+
+        const auto commitsBeforeEnter = ic.commits.size();
+        const auto deletesBeforeEnter = ic.surroundingDeletes.size();
+        require(send(engine, entry, ic, FcitxKey_Return), "HanNom surrounding raw Enter accepted");
+        require(ic.commits.size() == commitsBeforeEnter + 1 && ic.commits.back() == "thiên",
+                "HanNom surrounding raw Enter commits reading via core Enter");
+        require(ic.surroundingDeletes.size() > deletesBeforeEnter, "HanNom surrounding raw Enter replaces tracked preedit");
+        require(ic.inputPanel().candidateList() == nullptr, "HanNom surrounding raw Enter clears candidateList");
+        require(ic.inputPanel().clientPreedit().toString().empty(), "HanNom surrounding raw Enter leaves client preedit empty");
+    }
+
+    {
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        RawConfig config;
+        config.setValueByPath("InputMethod", "HanNomTelex");
+        engine.setConfig(config);
+
+        require(send(engine, entry, ic, FcitxKey_n), "HanNom nav n accepted");
+        require(send(engine, entry, ic, FcitxKey_a), "HanNom nav a accepted");
+        require(send(engine, entry, ic, FcitxKey_m), "HanNom nav m accepted");
+        require(ic.inputPanel().clientPreedit().toString() == "nam", "HanNom nav composes reading nam");
+        require(ic.inputPanel().candidateList() != nullptr, "HanNom nav live candidateList exists before Space");
+        auto* liveCandidates = ic.inputPanel().candidateList().get();
+        require(liveCandidates->size() > 1, "HanNom nav reading has at least two live candidates");
+
+        require(send(engine, entry, ic, FcitxKey_Down), "HanNom Down highlights first live candidate");
+        require(send(engine, entry, ic, FcitxKey_Down), "HanNom second Down highlights second live candidate");
+        auto* highlightedCandidates = ic.inputPanel().candidateList().get();
+        require(highlightedCandidates != nullptr, "HanNom highlighted candidateList remains visible");
+        require(highlightedCandidates->cursorIndex() == 1, "HanNom second candidate is highlighted");
+        const auto highlighted = candidateText(*highlightedCandidates, highlightedCandidates->cursorIndex());
+        require(send(engine, entry, ic, FcitxKey_Return), "HanNom Enter commits highlighted candidate");
+        require(ic.commits.size() == 1 && ic.commits.back() == highlighted, "HanNom Enter commits exact highlighted glyph");
+        require(ic.inputPanel().candidateList() == nullptr, "HanNom highlighted Enter clears candidateList");
+        require(ic.inputPanel().clientPreedit().toString().empty(), "HanNom highlighted Enter clears preedit");
+
+        require(send(engine, entry, ic, FcitxKey_n), "HanNom page n accepted");
+        require(send(engine, entry, ic, FcitxKey_a), "HanNom page a accepted");
+        require(send(engine, entry, ic, FcitxKey_m), "HanNom page m accepted");
+        require(ic.inputPanel().candidateList() != nullptr, "HanNom page candidateList exists");
+        require(send(engine, entry, ic, FcitxKey_Page_Down), "HanNom PageDown accepted for candidate list");
+        require(send(engine, entry, ic, FcitxKey_Page_Up), "HanNom PageUp accepted for candidate list");
+        require(send(engine, entry, ic, FcitxKey_Escape), "HanNom Escape returns to reading after paging");
 
         require(send(engine, entry, ic, FcitxKey_space), "HanNom space accepted");
         require(ic.inputPanel().candidateList() != nullptr, "HanNom space populates candidateList");
         require(ic.inputPanel().candidateList()->size() > 0, "HanNom candidateList is non-empty");
-
-        // Test candidate navigation keys
-        require(send(engine, entry, ic, FcitxKey_Page_Down), "HanNom PageDown accepted for candidate list");
-        require(send(engine, entry, ic, FcitxKey_Page_Up), "HanNom PageUp accepted for candidate list");
-
         require(send(engine, entry, ic, FcitxKey_1), "HanNom digit 1 accepted");
-        require(ic.commits.size() == 1, "HanNom digit 1 commits selected character");
+        require(ic.commits.size() == 2, "HanNom digit 1 commits selected character");
         require(ic.inputPanel().candidateList() == nullptr, "HanNom selection clears candidateList");
     }
 
