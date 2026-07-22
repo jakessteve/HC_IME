@@ -22,6 +22,7 @@ use language::is_known_english_word;
 use session::{render_raw_input, vni_digit_transforms_buffer, Session};
 use transform::{apply_circumflex, apply_telex_w, apply_tone_to_word};
 
+use crate::han_nom::get_global_dict;
 use vowel::strip_all_marks;
 
 thread_local! {
@@ -502,7 +503,13 @@ impl Session {
         result.reading[..r_len].copy_from_slice(&r_bytes[..r_len]);
         result.reading_len = r_len as u16;
 
-        if self.nom_phase == NomPhase::Candidate && !self.nom_candidates.is_empty() {
+        if self.nom_phase == NomPhase::Reading && !self.buffer.is_empty() {
+            if let Ok(dict) = get_global_dict() {
+                self.nom_candidates = dict.lookup(&self.buffer);
+            }
+        }
+
+        if !self.nom_candidates.is_empty() && !self.buffer.is_empty() {
             let start = self.candidate_page * 9;
             let end = (start + 9).min(self.nom_candidates.len());
             let page_candidates = &self.nom_candidates[start..end];

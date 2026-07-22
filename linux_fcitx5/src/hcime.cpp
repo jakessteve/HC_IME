@@ -842,6 +842,7 @@ private:
             state.surroundingTextEnabled = false;
             clearPreedit(ic);
             ic->inputPanel().setCandidateList(nullptr);
+            ic->updateUserInterface(UserInterfaceComponent::InputPanel, true);
             return;
         }
 
@@ -862,6 +863,8 @@ private:
                 if (nomResult.candidate_count > 0 && nomResult.candidates != nullptr) {
                     auto candidateList = std::make_unique<CommonCandidateList>();
                     candidateList->setLabels({"1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9."});
+                    candidateList->setPageSize(9);
+                    candidateList->setLayoutHint(CandidateLayoutHint::NotSet);
                     for (uint16_t i = 0; i < nomResult.candidate_count; ++i) {
                         std::string candStr(reinterpret_cast<const char*>(nomResult.candidates[i].utf8), nomResult.candidates[i].byte_len);
                         candidateList->append<DisplayOnlyCandidateWord>(Text(candStr));
@@ -871,6 +874,7 @@ private:
                     ic->inputPanel().setCandidateList(nullptr);
                 }
             }
+            ic->updateUserInterface(UserInterfaceComponent::InputPanel, true);
         }
     }
 

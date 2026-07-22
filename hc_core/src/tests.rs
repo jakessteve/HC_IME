@@ -2441,7 +2441,10 @@ fn hannom_escape_from_candidate_returns_to_reading_with_preedit() {
     req.text = esc.as_ptr();
     hc_session_handle_key_hannom(session, &req, &mut res);
     assert_eq!(res.handled, 1);
-    assert_eq!(res.candidate_count, 0, "candidates cleared after escape");
+    assert!(
+        res.candidate_count > 0,
+        "live candidates populated for reading"
+    );
     let reading = std::str::from_utf8(&res.reading[..res.reading_len as usize]).unwrap();
     assert_eq!(
         reading, "thiên",
