@@ -56,6 +56,8 @@ LD_LIBRARY_PATH="$DESTDIR_PATH/usr/lib/fcitx5" ldd "$ADDON" | grep -q "$CORE"
 readelf -d "$ADDON" | grep -q 'RUNPATH.*\$ORIGIN'
 nm -D "$CORE" | grep -q 'hc_session_handle_key'
 nm -D "$CORE" | grep -q 'hc_session_handle_key_hannom_v2'
+nm -D "$CORE" | grep -q 'hc_session_handle_key_hannom_v3'
+nm -D "$CORE" | grep -q 'hc_session_select_hannom_candidate_v3'
 nm -D "$CORE" | grep -q 'hc_compose_with_request'
 nm -D "$CORE" | grep -q 'hc_rehydrate_apply'
 grep -a -q 'HC_IME' "$ADDON"

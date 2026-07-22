@@ -2,6 +2,8 @@ use crate::vowel::strip_all_marks;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::fs::{File, OpenOptions};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -29,6 +31,125 @@ pub struct PhraseEntry {
 #[derive(Debug)]
 pub struct EmbeddedPhraseDict {
     entries: Vec<PhraseEntry>,
+}
+
+pub const USER_PHRASE_MAX_BYTES: u64 = 2 * 1024 * 1024;
+pub const USER_PHRASE_MAX_ROWS: usize = 50_000;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UserPhraseLoadSummary {
+    pub loaded: usize,
+    pub malformed: usize,
+    pub invalid_utf8: bool,
+    pub rejected_oversize: bool,
+    pub unreadable: bool,
+}
+
+fn open_regular_user_phrase_file(path: &Path) -> Result<File, UserPhraseLoadSummary> {
+    let mut summary = UserPhraseLoadSummary::default();
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_NONBLOCK keeps a path swapped to a FIFO from stalling the IME.
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(0o4000)
+            .open(path)
+    };
+    #[cfg(not(unix))]
+    let file = File::open(path);
+    let Ok(file) = file else {
+        summary.unreadable = true;
+        return Err(summary);
+    };
+    let Ok(metadata) = file.metadata() else {
+        summary.unreadable = true;
+        return Err(summary);
+    };
+    if !metadata.file_type().is_file() {
+        summary.unreadable = true;
+        return Err(summary);
+    }
+    if metadata.len() > USER_PHRASE_MAX_BYTES {
+        summary.rejected_oversize = true;
+        return Err(summary);
+    }
+    Ok(file)
+}
+
+fn is_cjk_scalar(ch: char) -> bool {
+    matches!(ch as u32,
+        0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff |
+        0x20000..=0x2fa1f | 0x30000..=0x323af)
+}
+
+/// Load an optional user dictionary outside the typing path. Invalid files
+/// fail closed so the bundled dictionary remains the only source.
+pub fn load_user_phrase_dict(path: &Path) -> (Vec<PhraseEntry>, UserPhraseLoadSummary) {
+    let file = match open_regular_user_phrase_file(path) {
+        Ok(file) => file,
+        Err(summary) => return (Vec::new(), summary),
+    };
+    let mut summary = UserPhraseLoadSummary::default();
+    let mut bytes = Vec::new();
+    let mut reader = file.take(USER_PHRASE_MAX_BYTES + 1);
+    if reader.read_to_end(&mut bytes).is_err() {
+        summary.unreadable = true;
+        return (Vec::new(), summary);
+    }
+    if bytes.len() as u64 > USER_PHRASE_MAX_BYTES {
+        summary.rejected_oversize = true;
+        return (Vec::new(), summary);
+    }
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        summary.invalid_utf8 = true;
+        return (Vec::new(), summary);
+    };
+    let mut entries = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut rows = 0usize;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        rows += 1;
+        if rows > USER_PHRASE_MAX_ROWS {
+            summary.rejected_oversize = true;
+            return (Vec::new(), summary);
+        }
+        let Some((reading, glyphs)) = line.split_once('\t') else {
+            summary.malformed += 1;
+            continue;
+        };
+        if glyphs.contains('\t') {
+            summary.malformed += 1;
+            continue;
+        }
+        let reading = normalize_phrase_reading(reading);
+        let glyphs = glyphs.trim();
+        if reading.split(' ').count() != 2
+            || reading.split(' ').any(|part| part.is_empty())
+            || !reading
+                .split(' ')
+                .all(crate::language::is_valid_vietnamese_word)
+            || glyphs.chars().count() != 2
+            || !glyphs.chars().all(is_cjk_scalar)
+        {
+            summary.malformed += 1;
+            continue;
+        }
+        let pair = (reading.clone(), glyphs.to_owned());
+        if seen.insert(pair) {
+            entries.push(PhraseEntry {
+                reading,
+                glyphs: glyphs.to_owned(),
+                system_rank: entries.len() as u32,
+            });
+        }
+    }
+    summary.loaded = entries.len();
+    (entries, summary)
 }
 
 pub fn normalize_phrase_reading(value: &str) -> String {

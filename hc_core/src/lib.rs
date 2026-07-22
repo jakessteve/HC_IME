@@ -23,7 +23,8 @@ use session::{render_raw_input, vni_digit_transforms_buffer, NomTextCandidate, S
 use transform::{apply_circumflex, apply_telex_w, apply_tone_to_word};
 
 use crate::han_nom::{
-    get_global_dict, get_global_phrase_dict, normalize_phrase_reading, PhraseHistory,
+    get_global_dict, get_global_phrase_dict, load_user_phrase_dict, normalize_phrase_reading,
+    PhraseHistory,
 };
 use vowel::strip_all_marks;
 
@@ -43,6 +44,28 @@ impl Session {
             }
         }
         self.phrase_history = PhraseHistory::load(&self.phrase_history_path);
+    }
+
+    fn set_hannom_options_v2(&mut self, options: &HC_HanNomOptionsV2) {
+        self.set_hannom_options(&HC_HanNomOptions {
+            phrase_prediction: options.phrase_prediction,
+            learning_enabled: options.learning_enabled,
+            history_path: options.history_path,
+        });
+        self.user_phrase_path = None;
+        if !options.user_phrase_path.is_null() {
+            if let Some(path) = key_text(options.user_phrase_path).filter(|path| !path.is_empty()) {
+                self.user_phrase_path = Some(std::path::PathBuf::from(path));
+            }
+        }
+        self.reload_user_phrase_entries();
+    }
+
+    fn reload_user_phrase_entries(&mut self) {
+        self.user_phrase_entries.clear();
+        if let Some(path) = self.user_phrase_path.as_deref() {
+            self.user_phrase_entries = load_user_phrase_dict(path).0;
+        }
     }
 
     fn phrase_reading(&self) -> String {
@@ -66,8 +89,10 @@ impl Session {
                     reading: self.buffer.clone(),
                     kind: 3,
                     system_rank: rank as u32,
+                    source_tier: 1,
                 });
             }
+            self.sort_phrase_candidates();
             return;
         }
         let Ok(phrases) = get_global_phrase_dict() else {
@@ -88,7 +113,23 @@ impl Session {
                 reading: entry.reading,
                 kind: if exact { 0 } else { 1 },
                 system_rank: entry.system_rank,
+                source_tier: 1,
             });
+        }
+        for entry in &self.user_phrase_entries {
+            if (exact && entry.reading == normalized)
+                || (!exact
+                    && self.phrase_prediction_enabled
+                    && entry.reading.starts_with(&normalized))
+            {
+                self.phrase_candidates.push(NomTextCandidate {
+                    text: entry.glyphs.clone(),
+                    reading: entry.reading.clone(),
+                    kind: if exact { 0 } else { 1 },
+                    system_rank: entry.system_rank,
+                    source_tier: 0,
+                });
+            }
         }
         if exact && self.phrase_candidates.is_empty() {
             let first = self.phrase_first.as_deref().unwrap_or_default();
@@ -101,10 +142,15 @@ impl Session {
                         reading: normalized.clone(),
                         kind: 2,
                         system_rank: (li * 3 + ri) as u32,
+                        source_tier: 2,
                     });
                 }
             }
         }
+        self.sort_phrase_candidates();
+    }
+
+    fn sort_phrase_candidates(&mut self) {
         self.phrase_candidates.sort_by(|left, right| {
             let class = left.kind.cmp(&right.kind);
             if class != std::cmp::Ordering::Equal {
@@ -122,6 +168,7 @@ impl Session {
             };
             rc.cmp(&lc)
                 .then_with(|| rt.cmp(&lt))
+                .then_with(|| left.source_tier.cmp(&right.source_tier))
                 .then_with(|| left.system_rank.cmp(&right.system_rank))
                 .then_with(|| left.text.cmp(&right.text))
         });
@@ -158,6 +205,37 @@ impl Session {
             self.ffi_phrase_candidates_buf.as_ptr()
         };
         result.candidate_count = self.ffi_phrase_candidates_buf.len() as u16;
+    }
+
+    fn populate_nom_result_v3(&mut self, result: &mut HC_HanNomResultV3, handled: u8) {
+        const MAX_CANDIDATES: usize = 256;
+        self.rebuild_phrase_candidates();
+        self.reading_buffer = self.phrase_reading();
+        self.ffi_phrase_candidates_buf.clear();
+        let total = self.phrase_candidates.len();
+        for candidate in self.phrase_candidates.iter().take(MAX_CANDIDATES) {
+            self.ffi_phrase_candidates_buf.push(HC_HanNomCandidateText {
+                text: candidate.text.as_ptr(),
+                text_len: candidate.text.len().min(u16::MAX as usize) as u16,
+                reading: candidate.reading.as_ptr(),
+                reading_len: candidate.reading.len().min(u16::MAX as usize) as u16,
+                kind: candidate.kind,
+            });
+        }
+        result.status_flag = HCStatusFlag::InProgress as i32;
+        result.error_code = HCErrorCode::None as i32;
+        result.reading = self.reading_buffer.as_ptr();
+        result.reading_len = self.reading_buffer.len().min(u16::MAX as usize) as u16;
+        result.candidates = if self.ffi_phrase_candidates_buf.is_empty() {
+            ptr::null()
+        } else {
+            self.ffi_phrase_candidates_buf.as_ptr()
+        };
+        result.candidate_count = self.ffi_phrase_candidates_buf.len() as u16;
+        result.total_candidate_count = total.min(u16::MAX as usize) as u16;
+        result.page_size = 9;
+        result.truncated = (total > MAX_CANDIDATES) as u8;
+        result.handled = handled;
     }
 
     fn commit_phrase_text(
@@ -348,6 +426,79 @@ impl Session {
         };
         self.record_phrase_selection(&candidate.reading, &candidate.text);
         self.commit_phrase_text(candidate.text, candidate.reading, result);
+        1
+    }
+
+    fn handle_han_nom_key_v3(
+        &mut self,
+        request: &HC_KeyRequest,
+        result: &mut HC_HanNomResultV3,
+    ) -> i32 {
+        *result = HC_HanNomResultV3 {
+            status_flag: HCStatusFlag::InProgress as i32,
+            error_code: HCErrorCode::None as i32,
+            reading: ptr::null(),
+            reading_len: 0,
+            candidates: ptr::null(),
+            candidate_count: 0,
+            total_candidate_count: 0,
+            page_size: 9,
+            truncated: 0,
+            handled: 0,
+        };
+        if matches!(key_kind(request.kind), Some(HCKeyKind::Printable))
+            && matches!(
+                key_text(request.text).unwrap_or(""),
+                "=" | "+" | "]" | "-" | "["
+            )
+        {
+            // V3 deliberately keeps paging in Fcitx; never mutate the frozen V2 page cursor.
+            self.populate_nom_result_v3(result, 1);
+            return 1;
+        }
+        let mut v2 = HC_HanNomResultV2 {
+            status_flag: 0,
+            error_code: 0,
+            reading: ptr::null(),
+            reading_len: 0,
+            candidates: ptr::null(),
+            candidate_count: 0,
+            handled: 0,
+        };
+        let handled = self.handle_han_nom_key_v2(request, &mut v2);
+        if handled == 0 {
+            return 0;
+        }
+        if v2.status_flag == HCStatusFlag::Commit as i32 {
+            result.status_flag = v2.status_flag;
+            result.error_code = v2.error_code;
+            result.reading = v2.reading;
+            result.reading_len = v2.reading_len;
+            result.handled = v2.handled;
+        } else {
+            self.populate_nom_result_v3(result, v2.handled);
+        }
+        handled
+    }
+
+    fn select_han_nom_candidate_v3(&mut self, index: usize, result: &mut HC_HanNomResultV3) -> i32 {
+        self.rebuild_phrase_candidates();
+        let Some(candidate) = self.phrase_candidates.get(index).cloned() else {
+            return 0;
+        };
+        self.record_phrase_selection(&candidate.reading, &candidate.text);
+        self.ffi_v2_output = candidate.text;
+        result.status_flag = HCStatusFlag::Commit as i32;
+        result.error_code = HCErrorCode::None as i32;
+        result.reading = self.ffi_v2_output.as_ptr();
+        result.reading_len = self.ffi_v2_output.len().min(u16::MAX as usize) as u16;
+        result.candidates = ptr::null();
+        result.candidate_count = 0;
+        result.total_candidate_count = 0;
+        result.page_size = 9;
+        result.truncated = 0;
+        result.handled = 1;
+        self.reset();
         1
     }
     fn handle_key(&mut self, request: &HC_KeyRequest) -> HC_KeyResult {
@@ -1004,6 +1155,7 @@ pub extern "C" fn hc_session_reset(session: *mut std::ffi::c_void) {
     unsafe {
         let session = &mut *(session as *mut Session);
         session.reset();
+        session.reload_user_phrase_entries();
     }
 }
 
@@ -1441,6 +1593,48 @@ pub extern "C" fn hc_session_set_hannom_options(
     }
     unsafe {
         (&mut *(session as *mut Session)).set_hannom_options(&*options);
+    }
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn hc_session_handle_key_hannom_v3(
+    session: *mut std::ffi::c_void,
+    request: *const HC_KeyRequest,
+    result: *mut HC_HanNomResultV3,
+) -> i32 {
+    if session.is_null() || request.is_null() || result.is_null() {
+        return 0;
+    }
+    unsafe { (&mut *(session as *mut Session)).handle_han_nom_key_v3(&*request, &mut *result) }
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn hc_session_select_hannom_candidate_v3(
+    session: *mut std::ffi::c_void,
+    index: u16,
+    result: *mut HC_HanNomResultV3,
+) -> i32 {
+    if session.is_null() || result.is_null() {
+        return 0;
+    }
+    unsafe {
+        (&mut *(session as *mut Session)).select_han_nom_candidate_v3(index as usize, &mut *result)
+    }
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn hc_session_set_hannom_options_v2(
+    session: *mut std::ffi::c_void,
+    options: *const HC_HanNomOptionsV2,
+) {
+    if session.is_null() || options.is_null() {
+        return;
+    }
+    unsafe {
+        (&mut *(session as *mut Session)).set_hannom_options_v2(&*options);
     }
 }
 

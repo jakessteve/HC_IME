@@ -142,6 +142,28 @@ typedef struct HC_HanNomOptions {
     const char* history_path;
 } HC_HanNomOptions;
 
+/* V3 leaves paging to Fcitx. Candidate pointers are borrowed until the next
+ * Hán Nôm call on the same session or session destruction. */
+typedef struct HC_HanNomOptionsV2 {
+    uint8_t phrase_prediction;
+    uint8_t learning_enabled;
+    const char* history_path;
+    const char* user_phrase_path;
+} HC_HanNomOptionsV2;
+
+typedef struct HC_HanNomResultV3 {
+    int32_t status_flag;
+    int32_t error_code;
+    const uint8_t* reading;
+    uint16_t reading_len;
+    const HC_HanNomCandidateText* candidates;
+    uint16_t candidate_count;
+    uint16_t total_candidate_count;
+    uint8_t page_size;
+    uint8_t truncated;
+    uint8_t handled;
+} HC_HanNomResultV3;
+
 enum HC_InputMode {
     HC_INPUT_TELEX = 0,
     HC_INPUT_VNI = 1,
@@ -183,6 +205,9 @@ int32_t hc_session_handle_key_hannom(void* session, const HC_KeyRequest* request
 int32_t hc_session_handle_key_hannom_v2(void* session, const HC_KeyRequest* request, HC_HanNomResultV2* result);
 int32_t hc_session_select_hannom_candidate_v2(void* session, uint16_t index, HC_HanNomResultV2* result);
 void hc_session_set_hannom_options(void* session, const HC_HanNomOptions* options);
+int32_t hc_session_handle_key_hannom_v3(void* session, const HC_KeyRequest* request, HC_HanNomResultV3* result);
+int32_t hc_session_select_hannom_candidate_v3(void* session, uint16_t absolute_index, HC_HanNomResultV3* result);
+void hc_session_set_hannom_options_v2(void* session, const HC_HanNomOptionsV2* options);
 void hc_session_reset_hannom_learning(void* session);
 void hc_session_flush_hannom_learning(void* session);
 int32_t hc_nom_dict_status(void* session);

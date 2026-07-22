@@ -118,6 +118,34 @@ pub struct HC_HanNomOptions {
     pub history_path: *const c_char,
 }
 
+/// Additive Hán Nôm options. Paths are copied by the setter; callers may free
+/// their input immediately after the call returns.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HC_HanNomOptionsV2 {
+    pub phrase_prediction: u8,
+    pub learning_enabled: u8,
+    pub history_path: *const c_char,
+    pub user_phrase_path: *const c_char,
+}
+
+/// V3 exposes the complete ranked candidate sequence. The returned pointers
+/// are borrowed until the next Hán Nôm call on the same session (or free).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HC_HanNomResultV3 {
+    pub status_flag: i32,
+    pub error_code: i32,
+    pub reading: *const u8,
+    pub reading_len: u16,
+    pub candidates: *const HC_HanNomCandidateText,
+    pub candidate_count: u16,
+    pub total_candidate_count: u16,
+    pub page_size: u8,
+    pub truncated: u8,
+    pub handled: u8,
+}
+
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NomPhase {

@@ -2959,6 +2959,19 @@ fn v2_text(result: &HC_HanNomResultV2) -> String {
     }
 }
 
+fn v3_candidate_text(result: &HC_HanNomResultV3, index: usize) -> String {
+    assert!(index < result.candidate_count as usize);
+    let candidate = unsafe { &*result.candidates.add(index) };
+    unsafe {
+        std::str::from_utf8(std::slice::from_raw_parts(
+            candidate.text,
+            candidate.text_len as usize,
+        ))
+        .unwrap()
+        .to_owned()
+    }
+}
+
 #[test]
 fn hannom_v2_converts_common_two_word_phrase_and_predicts() {
     let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
@@ -3216,4 +3229,164 @@ fn hannom_v2_defers_learning_file_io_until_explicit_flush() {
     hc_session_flush_hannom_learning(session);
     assert!(path.exists(), "lifecycle flush persists deferred learning");
     hc_session_free(session);
+}
+
+#[test]
+fn hannom_v3_exposes_full_candidates_and_selects_absolute_index() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut result: HC_HanNomResultV3 = unsafe { std::mem::zeroed() };
+    for ch in "nhân".chars() {
+        let key = c(&ch.to_string());
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = key.as_ptr();
+        assert_eq!(
+            hc_session_handle_key_hannom_v3(session, &req, &mut result),
+            1
+        );
+    }
+    assert_eq!(result.page_size, 9);
+    assert!(
+        result.candidate_count > 9,
+        "V3 returns Fcitx-owned full list"
+    );
+    assert_eq!(result.candidate_count, result.total_candidate_count);
+    assert_eq!(result.truncated, 0);
+    let page_two = v3_candidate_text(&result, 9);
+    assert_eq!(
+        hc_session_select_hannom_candidate_v3(session, 9, &mut result),
+        1
+    );
+    assert_eq!(
+        v2_text(&HC_HanNomResultV2 {
+            status_flag: result.status_flag,
+            error_code: result.error_code,
+            reading: result.reading,
+            reading_len: result.reading_len,
+            candidates: ptr::null(),
+            candidate_count: 0,
+            handled: result.handled,
+        }),
+        page_two
+    );
+    hc_session_free(session);
+}
+
+#[test]
+fn hannom_v3_out_of_range_selection_is_non_mutating_and_user_tsv_wins() {
+    let dir = std::env::temp_dir().join(format!("hcime-v3-tsv-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("phrases.tsv");
+    std::fs::write(&path, "# preferred\nhóa trang\t化妝\ninvalid\n").unwrap();
+    let path_c = c(path.to_str().unwrap());
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    hc_session_set_hannom_options_v2(
+        session,
+        &HC_HanNomOptionsV2 {
+            phrase_prediction: 1,
+            learning_enabled: 0,
+            history_path: ptr::null(),
+            user_phrase_path: path_c.as_ptr(),
+        },
+    );
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut result: HC_HanNomResultV3 = unsafe { std::mem::zeroed() };
+    for ch in "hóa".chars() {
+        let key = c(&ch.to_string());
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = key.as_ptr();
+        hc_session_handle_key_hannom_v3(session, &req, &mut result);
+    }
+    let space = c(" ");
+    req.kind = HCKeyKind::Space as i32;
+    req.text = space.as_ptr();
+    hc_session_handle_key_hannom_v3(session, &req, &mut result);
+    for ch in "trang".chars() {
+        let key = c(&ch.to_string());
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = key.as_ptr();
+        hc_session_handle_key_hannom_v3(session, &req, &mut result);
+    }
+    assert_eq!(v3_candidate_text(&result, 0), "化妝");
+    let reading_before =
+        unsafe { std::slice::from_raw_parts(result.reading, result.reading_len as usize) }.to_vec();
+    assert_eq!(
+        hc_session_select_hannom_candidate_v3(session, 255, &mut result),
+        0
+    );
+    let mut after: HC_HanNomResultV3 = unsafe { std::mem::zeroed() };
+    let equals = c("=");
+    req.kind = HCKeyKind::Printable as i32;
+    req.text = equals.as_ptr();
+    hc_session_handle_key_hannom_v3(session, &req, &mut after);
+    let reading_after =
+        unsafe { std::slice::from_raw_parts(after.reading, after.reading_len as usize) };
+    assert_eq!(reading_before, reading_after);
+
+    std::fs::write(&path, "hóa trang\t化裝\n").unwrap();
+    hc_session_reset(session);
+    for ch in "hóa".chars() {
+        let key = c(&ch.to_string());
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = key.as_ptr();
+        hc_session_handle_key_hannom_v3(session, &req, &mut result);
+    }
+    req.kind = HCKeyKind::Space as i32;
+    req.text = space.as_ptr();
+    hc_session_handle_key_hannom_v3(session, &req, &mut result);
+    for ch in "trang".chars() {
+        let key = c(&ch.to_string());
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = key.as_ptr();
+        hc_session_handle_key_hannom_v3(session, &req, &mut result);
+    }
+    assert_eq!(
+        v3_candidate_text(&result, 0),
+        "化裝",
+        "reset reloads configured TSV"
+    );
+    hc_session_free(session);
+}
+
+#[test]
+fn user_phrase_loader_rejects_bad_files_and_preserves_first_duplicate() {
+    let dir = std::env::temp_dir().join(format!("hcime-user-phrases-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let valid = dir.join("valid.tsv");
+    std::fs::write(
+        &valid,
+        "hóa trang\t化妝\nhóa trang\t化妝\na b\t甲乙\nhóa trang\tA乙\n",
+    )
+    .unwrap();
+    let (entries, summary) = crate::han_nom::load_user_phrase_dict(&valid);
+    assert_eq!(summary.loaded, 1);
+    assert_eq!(summary.malformed, 2);
+    assert_eq!(entries[0].glyphs, "化妝");
+    let invalid = dir.join("invalid.tsv");
+    std::fs::write(&invalid, [0xff, 0xfe]).unwrap();
+    let (entries, summary) = crate::han_nom::load_user_phrase_dict(&invalid);
+    assert!(entries.is_empty() && summary.invalid_utf8);
+    let (entries, summary) = crate::han_nom::load_user_phrase_dict(&dir);
+    assert!(
+        entries.is_empty() && summary.unreadable,
+        "non-regular path is rejected"
+    );
+}
+
+#[test]
+fn bundled_phrase_dictionary_has_aligned_nomstd_pairs_and_no_phrase_spill() {
+    let phrases = crate::han_nom::get_global_phrase_dict().unwrap();
+    assert!(phrases
+        .exact("âm học")
+        .iter()
+        .any(|entry| entry.glyphs == "音學"));
+    let hoa_trang = phrases.exact("hóa trang");
+    assert!(hoa_trang.iter().any(|entry| entry.glyphs == "化裝"));
+    assert!(hoa_trang.iter().any(|entry| entry.glyphs == "化妝"));
+    let chars = crate::han_nom::get_global_dict().unwrap();
+    assert!(chars.lookup("học").iter().all(|ch| !ch.is_ascii()));
+    assert!(
+        chars.lookup("học").len() <= 40,
+        "phrase components must not pollute single candidates"
+    );
 }

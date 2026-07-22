@@ -107,6 +107,34 @@ int main() {
         MockInputContext ic(manager);
         hcime::HcImeEngine engine(nullptr);
         const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        RawConfig config;
+        config.setValueByPath("InputMethod", "HanNomVni");
+        engine.setConfig(config);
+        require(engine.subMode(entry, ic) == "Hán Nôm (VNI)", "mode switches to Hán Nôm (VNI)");
+
+        require(send(engine, entry, ic, FcitxKey_a), "HanNom VNI a accepted");
+        require(ic.inputPanel().candidateList() != nullptr,
+                "HanNom VNI live reading exposes candidates before its tone trigger");
+        require(send(engine, entry, ic, FcitxKey_1), "HanNom VNI tone digit reaches the core");
+        require(ic.commits.empty(), "HanNom VNI unfocused tone digit does not select a candidate");
+        require(ic.inputPanel().clientPreedit().toString() == "á", "HanNom VNI composes a plus 1 as á");
+
+        require(send(engine, entry, ic, FcitxKey_Down), "HanNom VNI Down focuses a candidate");
+        auto* candidates = ic.inputPanel().candidateList().get();
+        require(candidates != nullptr && candidates->cursorIndex() >= 0,
+                "HanNom VNI focused candidate enables numeric selection");
+        const auto focused = candidateText(*candidates, candidates->cursorIndex());
+        require(send(engine, entry, ic, FcitxKey_1), "HanNom VNI focused numeric candidate selection accepted");
+        require(ic.commits.size() == 1 && ic.commits.back() == focused,
+                "HanNom VNI focused numeric digit selects the visible candidate");
+    }
+
+    {
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
         require(entries.size() == 1, "only one input method is exposed");
         require(entries.front().uniqueName() == "hcime", "the exposed input method is hcime");
         const auto& entry = entries.front();
@@ -493,11 +521,14 @@ int main() {
         require(ic.inputPanel().candidateList() == nullptr, "HanNom highlighted Enter clears candidateList");
         require(ic.inputPanel().clientPreedit().toString().empty(), "HanNom highlighted Enter clears preedit");
 
-        require(send(engine, entry, ic, FcitxKey_n), "HanNom page n accepted");
-        require(send(engine, entry, ic, FcitxKey_a), "HanNom page a accepted");
-        require(send(engine, entry, ic, FcitxKey_m), "HanNom page m accepted");
+        for (auto key : {FcitxKey_n, FcitxKey_h, FcitxKey_a, FcitxKey_f}) {
+            require(send(engine, entry, ic, key), "HanNom page-prefix key accepted");
+        }
+        require(send(engine, entry, ic, FcitxKey_space), "HanNom page-prefix delimiter accepted");
         require(ic.inputPanel().candidateList() != nullptr, "HanNom page candidateList exists");
-        require(ic.inputPanel().candidateList()->size() == 9, "HanNom page test has a second candidate page");
+        auto* pagedCandidates = dynamic_cast<CommonCandidateList*>(ic.inputPanel().candidateList().get());
+        require(pagedCandidates != nullptr && pagedCandidates->hasNext(),
+                "HanNom V3 exposes a native Fcitx second candidate page");
         const auto pageOneFirst = candidateText(*ic.inputPanel().candidateList(), 0);
         require(send(engine, entry, ic, FcitxKey_Page_Down), "HanNom PageDown moves candidate page");
         require(candidateText(*ic.inputPanel().candidateList(), 0) != pageOneFirst,
@@ -505,7 +536,21 @@ int main() {
         require(send(engine, entry, ic, FcitxKey_Page_Up), "HanNom PageUp restores candidate page");
         require(candidateText(*ic.inputPanel().candidateList(), 0) == pageOneFirst,
                 "HanNom PageUp restores displayed candidates");
-        require(send(engine, entry, ic, FcitxKey_Escape), "HanNom Escape returns to reading after paging");
+        require(send(engine, entry, ic, FcitxKey_Page_Down), "HanNom PageDown reopens page two");
+        const auto pageTwoFirst = candidateText(*ic.inputPanel().candidateList(), 0);
+        require(pageTwoFirst != pageOneFirst, "HanNom page two has a distinct visible candidate");
+        require(send(engine, entry, ic, FcitxKey_1), "HanNom page-two numeric selection accepted");
+        require(ic.commits.back() == pageTwoFirst,
+                "HanNom page-two numeric selection uses the candidate global index");
+
+        for (auto key : {FcitxKey_n, FcitxKey_h, FcitxKey_a, FcitxKey_f}) {
+            require(send(engine, entry, ic, key), "HanNom numeric key accepted");
+        }
+        require(ic.inputPanel().candidateList()->cursorIndex() == -1,
+                "HanNom numeric selection starts without a focus highlight");
+        const auto numericCandidate = candidateText(*ic.inputPanel().candidateList(), 0);
+        require(send(engine, entry, ic, FcitxKey_1), "HanNom numeric selection works before focus");
+        require(ic.commits.back() == numericCandidate, "HanNom numeric selection commits visible candidate");
 
     }
 

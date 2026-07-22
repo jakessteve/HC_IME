@@ -1,7 +1,7 @@
 # HC_IME Status
 
 This document is the local source of truth for the current repo snapshot.
-It reflects the `0cd9ab3` codebase snapshot and records only behavior backed
+It reflects the `f1968d1` codebase snapshot and records only behavior backed
 by the repository's tests or end-to-end smoke gate.
 
 ## Current Shape
@@ -38,7 +38,7 @@ by the repository's tests or end-to-end smoke gate.
   false diacritic application during composition.
 - Hán Nôm core engine and Fcitx5 addon are implemented across the seven planned
   feature areas (T1.0–T7.3):
-  - Data Pipeline (E1): Parsed Unihan, NomStandardization, cake_gao, pearapple123 into binary format v1 `hc_core/data/han_nom_dict.bin` (7,114 unique readings, 19,134 unique characters, 14,297 Extension B+ Nôm characters).
+  - Data Pipeline (E1): Parsed Unihan, NomStandardization, cake_gao, pearapple123 into binary format v1 `hc_core/data/han_nom_dict.bin` (7,079 unique readings, 19,079 unique characters, 11,038 Extension B+ Nôm characters).
   - Composition Engine Refactor (E2): Extracted `TypingEngine` in `hc_core/src/compose.rs` supporting `Inline` & `Dictionary` composition modes.
   - Core Nom Module (E3): Implemented dual-phase engine (`Reading` & `Candidate` phases), exact & toneless lookups, and candidate pagination.
   - FFI Layer (E4): Added `hc_session_handle_key_hannom` and `hc_nom_dict_status` to Rust C ABI & `hc_core_ffi.h`.
@@ -48,14 +48,14 @@ by the repository's tests or end-to-end smoke gate.
     prediction; the addon has a bridge-probe suite.
   - Verification (E7): `scripts/e2e-smoke.sh` is the current end-to-end gate;
     its fresh result is recorded below after each documentation sync.
-- CJK IME UX Alignment: Candidate Phase (Phase B) now distinguishes `Space` (commits Hán Nôm Candidate #1) from `Enter` (commits raw pre-edit reading / Quốc ngữ string); supports candidate pagination via `PageUp`/`PageDown`, `=`, `-`, `[`, `]`; and auto-commits Candidate #1 + punctuation on ASCII punctuation input.
-- Interactive Candidate Navigation: Arrow keys (`Up`/`Down`/`Left`/`Right`) and `Tab`/`Shift+Tab` move the highlight cursor across candidate items via `CommonCandidateList::nextCandidate()`/`prevCandidate()`. Pressing `Enter` while a candidate is highlighted commits that glyph; pressing `Enter` with no highlight (`cursorIndex == -1`) commits the raw Quốc ngữ reading. `PageUp`/`PageDown` remain dedicated to page turning.
-- Hán Nôm phrase prediction: the bundled `HNPH` phrase dictionary contains 409 validated two-word entries. A first Space keeps the first Vietnamese word in the preedit and offers typeahead; typing the second word prioritizes an exact full-glyph phrase, then generated two-glyph fallback candidates. A second Space commits the top phrase plus a literal space; raw Enter remains available without a focused candidate.
-- Hán Nôm V2 ABI: `HC_HanNomResultV2` and variable-length borrowed UTF-8 candidate text are additive to the V1 ABI, so multi-glyph phrases and Extension B+ text render safely in Fcitx5. Candidate comments show their full Vietnamese reading.
-- Local phrase learning is enabled by default and stores only normalized phrase reading, selected glyph phrase, count, and timestamp in the local state file. It is bounded to 2,048 entries, uses atomic 0600 writes, supports reset from the Fcitx5 status menu, and never performs file I/O during typing.
+- CJK IME UX Alignment: V3 returns up to 256 ranked candidates and delegates paging to Fcitx5 `CommonCandidateList`; the bridge displays vertical nine-item pages with bold glyph text, native buttons/wheel paging, `PageUp`/`PageDown`, `=`, `-`, `[`, `]`, and correct global-index selection on later pages.
+- Interactive Candidate Navigation: Arrow keys (`Up`/`Down`/`Left`/`Right`) and `Tab`/`Shift+Tab` move the highlight cursor. Telex/VIQR accept `1`–`9` for an unfocused visible candidate; in Hán Nôm VNI, unfocused digits remain tone/shape composition triggers and numeric selection requires candidate focus. Focused Enter commits the candidate and unfocused Enter commits the raw Quốc ngữ reading.
+- Hán Nôm phrase prediction: the bundled `HNPH` phrase dictionary contains 11,153 validated two-word `(reading, glyphs)` pairs. Exact phrases outrank prefix predictions and the 3×3 single-glyph fallback; alternate glyph sequences are retained. Optional bounded user TSV phrases rank first, accept only two valid normalized Vietnamese tokens and two CJK glyphs, and reload on options update or explicit session reset.
+- Hán Nôm ABI: V3 (`HC_HanNomResultV3`, V3 key handler, and absolute selector) is additive. V1/V2 structures, exports, and core-owned V2 paging remain unchanged. Borrowed V3 text lasts through the next Hán Nôm call on the same session or session destruction.
+- Local Hán Nôm learning ranks both single glyphs and phrases, remains bounded to 2,048 entries with atomic 0600 writes, resets both categories from the status menu, and never performs file I/O on the typing path.
 - Fcitx5 UI Lifecycle Fix: `updateHanNomUi` now calls `setCandidateList()`, then `setPreedit()`/`updatePreedit()`, then `updateUserInterface()`, so the candidate popup and client preedit are refreshed together during live Hán Nôm prediction.
 - TypingEngine extracted into `hc_core/src/compose.rs` with `CompositionMode` support (Inline and Dictionary modes).
-- Hán Nôm multi-source data pipeline is active: `scripts/build_nom_dict.rs` parses Unihan, NomStandardization, cake_gao, and pearapple123, producing a validated binary dictionary at `hc_core/data/han_nom_dict.bin` with 7,114 unique readings and 19,134 unique characters (14,297 Extension B+ Nôm characters).
+- Hán Nôm multi-source data pipeline is active: `scripts/build_nom_dict.rs` aligns NomStandardization reading and glyph token counts, rejects malformed/non-CJK variants deterministically, and never spills phrase glyphs into single candidates. Current source snapshots: 23,399 rows, 2,995 accepted single variants, 11,026 accepted phrase variants, 7,079 final readings, and 11,153 final phrase pairs.
 - Per-app output strategy overrides the global output mode: apps listed in
   `SurroundingTextApps` always use surrounding-text output, and apps listed in
   `PreeditApps` always use client preedit, regardless of the global setting.
@@ -147,7 +147,7 @@ New borrowed-output ABI:
 
 ## Latest Verification
 
-- 2026-07-22: `scripts/e2e-smoke.sh` passed for the two-word Hán Nôm phrase upgrade with 140 Rust tests,
+- 2026-07-23: `scripts/e2e-smoke.sh` passed for the candidate/prediction upgrade with 144 Rust tests,
   Clippy, the Fcitx5 bridge probe, staged installation, metadata checks,
   runtime-linkage checks, ABI-export checks, and deterministic regeneration of
   both bundled Hán Nôm binaries.

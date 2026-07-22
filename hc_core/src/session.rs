@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::ffi::c_char;
 use std::time::Instant;
 
-use crate::han_nom::{default_history_path, PhraseHistory};
+use crate::han_nom::{default_history_path, PhraseEntry, PhraseHistory};
 use crate::language::{is_viqr_trigger, language_scores};
 use crate::quick_consonants;
 use crate::types::{
@@ -16,6 +16,7 @@ pub struct NomTextCandidate {
     pub reading: String,
     pub kind: u8,
     pub system_rank: u32,
+    pub source_tier: u8,
 }
 use crate::vowel::strip_all_marks;
 
@@ -60,6 +61,8 @@ pub struct Session {
     pub phrase_history_path: std::path::PathBuf,
     pub phrase_history: PhraseHistory,
     pub phrase_history_dirty: bool,
+    pub user_phrase_path: Option<std::path::PathBuf>,
+    pub user_phrase_entries: Vec<PhraseEntry>,
 }
 
 impl Session {
@@ -102,6 +105,8 @@ impl Session {
             phrase_history_path: default_history_path(),
             phrase_history: PhraseHistory::default(),
             phrase_history_dirty: false,
+            user_phrase_path: None,
+            user_phrase_entries: Vec::new(),
         }
     }
 

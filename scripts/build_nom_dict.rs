@@ -17,7 +17,11 @@ struct PhraseEntry {
 }
 
 fn normalize_phrase_reading(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 fn parse_unihan(path: &Path) -> Result<HashMap<String, Vec<char>>, Box<dyn std::error::Error>> {
@@ -53,44 +57,99 @@ fn parse_unihan(path: &Path) -> Result<HashMap<String, Vec<char>>, Box<dyn std::
 
 struct NomStdRow {
     reading: String,
-    chunom: String,
+    glyph: char,
+}
+
+#[derive(Debug, Default)]
+struct NomStdMetrics {
+    rows: usize,
+    accepted_single_variants: usize,
+    accepted_phrase_variants: usize,
+    row_empty_glyph: usize,
+    row_three_plus_tokens: usize,
+    row_no_valid_variant: usize,
+    variant_unresolved: usize,
+    variant_non_cjk: usize,
+    variant_arity_mismatch: usize,
+    variant_empty: usize,
+}
+
+fn is_cjk_scalar(ch: char) -> bool {
+    matches!(ch as u32,
+        0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff |
+        0x20000..=0x2fa1f | 0x30000..=0x323af)
 }
 
 fn parse_nom_standardization(
     path: &Path,
-) -> Result<(Vec<NomStdRow>, usize), Box<dyn std::error::Error>> {
+) -> Result<(Vec<NomStdRow>, Vec<PhraseEntry>, NomStdMetrics), Box<dyn std::error::Error>> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
-    let mut rows = Vec::new();
-    let mut skipped_empty_count = 0;
+    let mut singles = Vec::new();
+    let mut phrases = Vec::new();
+    let mut metrics = NomStdMetrics::default();
 
     for (idx, line) in reader.lines().enumerate() {
         let line = line?;
         if idx == 0 || line.trim().is_empty() {
             continue; // Header or empty
         }
+        metrics.rows += 1;
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() >= 4 {
             let qnc = parts[2].trim();
             let chunom = parts[3].trim();
-            if chunom.is_empty() || chunom == "？" || chunom.contains('？') {
-                skipped_empty_count += 1;
+            if chunom.is_empty() {
+                metrics.row_empty_glyph += 1;
                 continue;
             }
-
-            for r in qnc.split_whitespace() {
-                let reading = r.to_lowercase();
-                if !reading.is_empty() {
-                    rows.push(NomStdRow {
-                        reading,
-                        chunom: chunom.to_string(),
-                    });
+            let readings: Vec<_> = qnc.split_whitespace().collect();
+            if readings.len() >= 3 {
+                metrics.row_three_plus_tokens += 1;
+                continue;
+            }
+            let mut accepted = false;
+            for variant in chunom.split('|') {
+                let variant = variant.trim();
+                if variant.is_empty() {
+                    metrics.variant_empty += 1;
+                    continue;
                 }
+                if variant.contains('？') {
+                    metrics.variant_unresolved += 1;
+                    continue;
+                }
+                let glyphs: Vec<char> = variant.chars().collect();
+                if !glyphs.iter().all(|ch| is_cjk_scalar(*ch)) {
+                    metrics.variant_non_cjk += 1;
+                    continue;
+                }
+                if readings.len() != glyphs.len() || !(readings.len() == 1 || readings.len() == 2) {
+                    metrics.variant_arity_mismatch += 1;
+                    continue;
+                }
+                accepted = true;
+                if readings.len() == 1 {
+                    singles.push(NomStdRow {
+                        reading: readings[0].to_lowercase(),
+                        glyph: glyphs[0],
+                    });
+                    metrics.accepted_single_variants += 1;
+                } else {
+                    phrases.push(PhraseEntry {
+                        reading: normalize_phrase_reading(qnc),
+                        glyphs: variant.to_owned(),
+                        system_rank: 0,
+                    });
+                    metrics.accepted_phrase_variants += 1;
+                }
+            }
+            if !accepted {
+                metrics.row_no_valid_variant += 1;
             }
         }
     }
-
-    Ok((rows, skipped_empty_count))
+    Ok((singles, phrases, metrics))
 }
 
 fn parse_rime_dict(path: &Path) -> Result<HashMap<String, Vec<char>>, Box<dyn std::error::Error>> {
@@ -147,7 +206,9 @@ fn parse_rime_phrases(path: &Path) -> Result<Vec<PhraseEntry>, Box<dyn std::erro
             in_compounds = true;
             continue;
         }
-        if !in_compounds || trimmed.is_empty() || trimmed.starts_with('#') { continue; }
+        if !in_compounds || trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() != 2 {
             return Err(format!("malformed compound row {}", line_no + 1).into());
@@ -157,17 +218,28 @@ fn parse_rime_phrases(path: &Path) -> Result<Vec<PhraseEntry>, Box<dyn std::erro
         if reading.split(' ').count() != 2 || glyphs.chars().count() < 2 {
             return Err(format!("invalid two-word compound row {}", line_no + 1).into());
         }
-        if !seen.insert(reading.clone()) {
-            return Err(format!("duplicate compound reading {reading}").into());
+        if !seen.insert((reading.clone(), glyphs.clone())) {
+            continue;
         }
-        phrases.push(PhraseEntry { reading, glyphs, system_rank: phrases.len() as u32 });
+        phrases.push(PhraseEntry {
+            reading,
+            glyphs,
+            system_rank: phrases.len() as u32,
+        });
     }
-    if phrases.len() != 409 { return Err(format!("expected 409 compound phrases, found {}", phrases.len()).into()); }
+    if phrases.len() != 409 {
+        return Err(format!("expected 409 compound phrases, found {}", phrases.len()).into());
+    }
     Ok(phrases)
 }
 
-fn serialize_phrase_v1(phrases: &[PhraseEntry], out_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(parent) = out_path.parent() { fs::create_dir_all(parent)?; }
+fn serialize_phrase_v1(
+    phrases: &[PhraseEntry],
+    out_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let mut file = File::create(out_path)?;
     file.write_all(b"HNPH")?;
     file.write_all(&[0x01, 0, 0, 0])?;
@@ -175,7 +247,9 @@ fn serialize_phrase_v1(phrases: &[PhraseEntry], out_path: &Path) -> Result<(), B
     for entry in phrases {
         let reading = entry.reading.as_bytes();
         let glyphs = entry.glyphs.as_bytes();
-        if reading.len() > u16::MAX as usize || glyphs.len() > u16::MAX as usize { return Err("phrase too long".into()); }
+        if reading.len() > u16::MAX as usize || glyphs.len() > u16::MAX as usize {
+            return Err("phrase too long".into());
+        }
         file.write_all(&(reading.len() as u16).to_le_bytes())?;
         file.write_all(reading)?;
         file.write_all(&(glyphs.len() as u16).to_le_bytes())?;
@@ -245,11 +319,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. NomStd
     let nomstd_path = Path::new("data/NomStandardization.csv");
-    let (nomstd_rows, skipped_empty) = parse_nom_standardization(nomstd_path)?;
+    let (nomstd_rows, mut nomstd_phrases, metrics) = parse_nom_standardization(nomstd_path)?;
     println!(
-        "NomStd loaded: {} valid rows (skipped {} empty CHUNOM rows)",
-        nomstd_rows.len(),
-        skipped_empty
+        "NomStd rows={} single_variants={} phrase_variants={} empty_glyph={} three_plus={} no_valid={} unresolved={} non_cjk={} arity={} empty_variant={}",
+        metrics.rows, metrics.accepted_single_variants, metrics.accepted_phrase_variants,
+        metrics.row_empty_glyph, metrics.row_three_plus_tokens, metrics.row_no_valid_variant,
+        metrics.variant_unresolved, metrics.variant_non_cjk, metrics.variant_arity_mismatch, metrics.variant_empty
     );
 
     // 3. cake_gao
@@ -260,30 +335,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 4. pearapple123
     let pear_path = Path::new("data/chu_nom.dict.yaml");
     let pear_map = parse_rime_dict(pear_path)?;
-    let phrases = parse_rime_phrases(pear_path)?;
+    let mut phrases = parse_rime_phrases(pear_path)?;
     println!("pearapple123 loaded: {} unique readings", pear_map.len());
-    println!("pearapple123 compounds loaded: {} two-word phrases", phrases.len());
+    println!(
+        "pearapple123 compounds loaded: {} two-word phrases",
+        phrases.len()
+    );
 
     // Merge into combined dict
     let mut combined: HashMap<String, Vec<char>> = HashMap::new();
     let mut unique_chars: HashSet<char> = HashSet::new();
     let mut ext_b_plus_count = 0;
 
-    // Layer 1: Unihan (authoritative Hán-Việt)
-    for (reading, chars) in unihan_map {
-        let entry = combined.entry(reading).or_default();
-        for ch in chars {
-            if !entry.contains(&ch) {
-                entry.push(ch);
-                unique_chars.insert(ch);
-                if (ch as u32) >= 0x20000 {
-                    ext_b_plus_count += 1;
-                }
-            }
-        }
-    }
-
-    // Layer 2: cake_gao (primary Nôm)
+    // Layer 1: Nôm sources are intentionally first. Unihan remains fallback.
     for (reading, chars) in cake_map {
         let entry = combined.entry(reading).or_default();
         for ch in chars {
@@ -297,7 +361,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Layer 3: pearapple123 (common Nôm supplement)
+    // Layer 2: pearapple123 (common Nôm supplement)
     for (reading, chars) in pear_map {
         let entry = combined.entry(reading).or_default();
         for ch in chars {
@@ -311,11 +375,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Layer 4: NomStd additions
+    // Layer 3: only aligned single-glyph NomStd entries enter the character map.
     for row in nomstd_rows {
         let entry = combined.entry(row.reading).or_default();
-        for ch in row.chunom.chars() {
-            if ch != '？' && !entry.contains(&ch) {
+        if !entry.contains(&row.glyph) {
+            entry.push(row.glyph);
+            unique_chars.insert(row.glyph);
+            if (row.glyph as u32) >= 0x20000 {
+                ext_b_plus_count += 1;
+            }
+        }
+    }
+
+    // Layer 4: Unihan (authoritative Hán-Việt fallback)
+    for (reading, chars) in unihan_map {
+        let entry = combined.entry(reading).or_default();
+        for ch in chars {
+            if !entry.contains(&ch) {
                 entry.push(ch);
                 unique_chars.insert(ch);
                 if (ch as u32) >= 0x20000 {
@@ -325,15 +401,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Keep alternate glyph sequences; dedupe only identical pairs.
+    let mut phrase_seen: HashSet<(String, String)> = phrases
+        .iter()
+        .map(|entry| (entry.reading.clone(), entry.glyphs.clone()))
+        .collect();
+    for entry in nomstd_phrases.drain(..) {
+        if phrase_seen.insert((entry.reading.clone(), entry.glyphs.clone())) {
+            phrases.push(entry);
+        }
+    }
+    for (rank, phrase) in phrases.iter_mut().enumerate() {
+        phrase.system_rank = rank as u32;
+    }
+
     println!("\n=== Combined Stats ===");
     println!("Total unique readings: {}", combined.len());
     println!("Total unique characters: {}", unique_chars.len());
     println!("Extension B+ characters (Nôm): {}", ext_b_plus_count);
 
+    // These snapshots make upstream-source drift deliberate and reviewable.
+    assert_eq!(metrics.rows, 23_399, "NomStd row-count snapshot changed");
+    assert_eq!(
+        metrics.accepted_single_variants, 2_995,
+        "NomStd single snapshot changed"
+    );
+    assert_eq!(
+        metrics.accepted_phrase_variants, 11_026,
+        "NomStd phrase snapshot changed"
+    );
+    assert_eq!(
+        metrics.row_empty_glyph, 6_128,
+        "NomStd empty-glyph snapshot changed"
+    );
+    assert_eq!(
+        metrics.row_three_plus_tokens, 807,
+        "NomStd 3+-token snapshot changed"
+    );
+    assert_eq!(
+        metrics.row_no_valid_variant, 3_675,
+        "NomStd no-valid snapshot changed"
+    );
+    assert_eq!(
+        metrics.variant_unresolved, 3_596,
+        "NomStd unresolved snapshot changed"
+    );
+    assert_eq!(
+        metrics.variant_non_cjk, 86,
+        "NomStd non-CJK snapshot changed"
+    );
+    assert_eq!(
+        metrics.variant_arity_mismatch, 1,
+        "NomStd arity snapshot changed"
+    );
+    assert_eq!(
+        metrics.variant_empty, 1,
+        "NomStd empty-variant snapshot changed"
+    );
+    assert_eq!(combined.len(), 7_079, "combined reading snapshot changed");
+    assert_eq!(phrases.len(), 11_153, "merged phrase snapshot changed");
+
     // Quality assertions
     assert!(
         combined.get("thiên").map_or(false, |v| v.contains(&'天')),
         "Quality assertion failed: 'thiên' must contain '天'"
+    );
+    assert!(
+        combined.values().flatten().all(|ch| !ch.is_ascii()),
+        "ASCII candidate leaked into dictionary"
     );
     assert!(
         combined.get("địa").map_or(false, |v| v.contains(&'地')),
@@ -362,7 +497,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let phrase_path = output_dir.join("han_nom_phrase_dict.bin");
     serialize_phrase_v1(&phrases, &phrase_path)?;
-    println!("Serialized phrase dictionary to {:?} ({} entries)", phrase_path, phrases.len());
+    println!(
+        "Serialized phrase dictionary to {:?} ({} entries)",
+        phrase_path,
+        phrases.len()
+    );
 
     // Generate quality report
     let mut report = File::create(output_dir.join("quality_report.txt"))?;
@@ -375,10 +514,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Extension B+ (Nôm) characters: {}",
         ext_b_plus_count
     )?;
+    writeln!(report, "NomStd rows: {}", metrics.rows)?;
     writeln!(
         report,
-        "Skipped empty CHUNOM rows from NomStd: {}",
-        skipped_empty
+        "NomStd accepted single variants: {}",
+        metrics.accepted_single_variants
+    )?;
+    writeln!(
+        report,
+        "NomStd accepted phrase variants: {}",
+        metrics.accepted_phrase_variants
+    )?;
+    writeln!(
+        report,
+        "NomStd row rejects: empty_glyph={} three_plus={} no_valid={}",
+        metrics.row_empty_glyph, metrics.row_three_plus_tokens, metrics.row_no_valid_variant
+    )?;
+    writeln!(
+        report,
+        "NomStd variant rejects: unresolved={} non_cjk={} arity={} empty={}",
+        metrics.variant_unresolved,
+        metrics.variant_non_cjk,
+        metrics.variant_arity_mismatch,
+        metrics.variant_empty
     )?;
     writeln!(report, "\nSample assertions verified:")?;
     writeln!(report, "  thiên -> 天: PASS")?;

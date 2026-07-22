@@ -150,7 +150,9 @@ FCITX_CONFIGURATION(
     Option<std::string> vietnameseDictionaryPath{
         this, "VietnameseDictionaryPath", "Vietnamese dictionary path",
         "/usr/share/fcitx5/bamboo/vietnamese.cm.dict"};
-    Option<std::string> englishDictionaryPath{this, "EnglishDictionaryPath", "English dictionary path", ""};)
+    Option<std::string> englishDictionaryPath{this, "EnglishDictionaryPath", "English dictionary path", ""};
+    Option<std::string> hanNomPhraseDictionaryPath{
+        this, "HanNomPhraseDictionaryPath", "Optional Hán Nôm phrase TSV (reading<TAB>glyphs)", ""};)
 
 FCITX_CONFIGURATION(
     HcImePerAppConfig,
@@ -411,9 +413,9 @@ public:
         const bool useSurroundingText = shouldUseSurroundingText(ic, state);
         if (!ensureHanNomCandidatePhase(ic, state, mode, useSurroundingText)) return;
 
-        HC_HanNomResultV2 nomResult;
+        HC_HanNomResultV3 nomResult;
         std::memset(&nomResult, 0, sizeof(nomResult));
-        if (hc_session_select_hannom_candidate_v2(state.session.ptr, static_cast<uint16_t>(candidateIndex), &nomResult) != 0) {
+        if (hc_session_select_hannom_candidate_v3(state.session.ptr, static_cast<uint16_t>(candidateIndex), &nomResult) != 0) {
             updateHanNomUi(ic, state, nomResult, useSurroundingText);
         }
     }
@@ -532,31 +534,23 @@ public:
                 }
             } else if (event.key().check(FcitxKey_Page_Down) || event.key().check(FcitxKey_KP_Page_Down) ||
                        event.key().check(FcitxKey_Next) || event.key().check(FcitxKey_KP_Next)) {
-                if (!ensureHanNomCandidatePhase(ic, state, mode, useSurroundingText)) return;
-                auto navRequest = makeKeyRequest(HC_KEY_PRINTABLE, "=", mode);
-                HC_HanNomResultV2 nomResult;
-                std::memset(&nomResult, 0, sizeof(nomResult));
-                if (hc_session_handle_key_hannom_v2(state.session.ptr, &navRequest, &nomResult) != 0) {
-                    updateHanNomPhase(state, navRequest, nomResult);
-                    updateHanNomUi(ic, state, nomResult, useSurroundingText);
+                if (candidateList != nullptr && candidateList->hasNext()) {
+                    candidateList->next();
+                    ic->updateUserInterface(UserInterfaceComponent::InputPanel, true);
                     event.filterAndAccept();
                     return;
                 }
             } else if (event.key().check(FcitxKey_Page_Up) || event.key().check(FcitxKey_KP_Page_Up) ||
                        event.key().check(FcitxKey_Prior) || event.key().check(FcitxKey_KP_Prior)) {
-                if (!ensureHanNomCandidatePhase(ic, state, mode, useSurroundingText)) return;
-                auto navRequest = makeKeyRequest(HC_KEY_PRINTABLE, "-", mode);
-                HC_HanNomResultV2 nomResult;
-                std::memset(&nomResult, 0, sizeof(nomResult));
-                if (hc_session_handle_key_hannom_v2(state.session.ptr, &navRequest, &nomResult) != 0) {
-                    updateHanNomPhase(state, navRequest, nomResult);
-                    updateHanNomUi(ic, state, nomResult, useSurroundingText);
+                if (candidateList != nullptr && candidateList->hasPrev()) {
+                    candidateList->prev();
+                    ic->updateUserInterface(UserInterfaceComponent::InputPanel, true);
                     event.filterAndAccept();
                     return;
                 }
             } else if (event.key().check(FcitxKey_Return) || event.key().check(FcitxKey_KP_Enter)) {
                 if (candidateList != nullptr && candidateList->cursorIndex() >= 0 && candidateList->cursorIndex() < candidateList->size()) {
-                    selectHanNomCandidate(ic, candidateList->cursorIndex());
+                    candidateList->candidate(candidateList->cursorIndex()).select(ic);
                     event.filterAndAccept();
                     return;
                 }
@@ -564,14 +558,27 @@ public:
                     event.filterAndAccept();
                     return;
                 }
-            } else if (candidateList != nullptr && candidateList->cursorIndex() >= 0 &&
-                       input.size() == 1 && input[0] >= '1' && input[0] <= '9') {
+            // VNI digits are composition triggers while the candidate list is
+            // merely showing live reading suggestions. Once the user focuses a
+            // candidate, they explicitly enter candidate-selection semantics.
+            } else if (candidateList != nullptr && input.size() == 1 && input[0] >= '1' && input[0] <= '9' &&
+                       (mode != 4 || candidateList->cursorIndex() >= 0)) {
                 const int index = input[0] - '1';
                 if (index < candidateList->size()) {
-                    selectHanNomCandidate(ic, index);
+                    candidateList->candidate(index).select(ic);
                     event.filterAndAccept();
                     return;
                 }
+            } else if (candidateList != nullptr && (input == "=" || input == "]" || input == "+")) {
+                if (candidateList->hasNext()) candidateList->next();
+                ic->updateUserInterface(UserInterfaceComponent::InputPanel, true);
+                event.filterAndAccept();
+                return;
+            } else if (candidateList != nullptr && (input == "-" || input == "[")) {
+                if (candidateList->hasPrev()) candidateList->prev();
+                ic->updateUserInterface(UserInterfaceComponent::InputPanel, true);
+                event.filterAndAccept();
+                return;
             }
         }
 
@@ -606,9 +613,9 @@ public:
         }
 
         if (mode >= 3 && mode <= 5) {
-            HC_HanNomResultV2 nomResult;
+            HC_HanNomResultV3 nomResult;
             std::memset(&nomResult, 0, sizeof(nomResult));
-            int32_t handled = hc_session_handle_key_hannom_v2(state.session.ptr, &request, &nomResult);
+            int32_t handled = hc_session_handle_key_hannom_v3(state.session.ptr, &request, &nomResult);
             if (handled == 0) return;
 
             updateHanNomPhase(state, request, nomResult);
@@ -634,12 +641,12 @@ public:
         }
 
         if (result.statusFlag == HC_STATUS_ESC_RESTORED_RAW) {
+            clearPreedit(event.inputContext());
             event.inputContext()->commitString(output);
             state.hasActivePreedit = false;
             state.hanNomCandidatePhase = false;
             state.previousSurroundingText.clear();
             state.surroundingTextEnabled = false;
-            clearPreedit(event.inputContext());
             event.filterAndAccept();
             return;
         }
@@ -665,6 +672,7 @@ public:
                 if (useSurroundingText) {
                     commitViaSurroundingText(event.inputContext(), state, output);
                 } else {
+                    clearPreedit(event.inputContext());
                     event.inputContext()->commitString(output);
                 }
                 updateSmartSwitch(state, appName, result.statusFlag);
@@ -673,7 +681,6 @@ public:
                 state.lastCommitTrailingChars = 0;
                 state.previousSurroundingText.clear();
                 state.surroundingTextEnabled = false;
-                clearPreedit(event.inputContext());
                 if (request.kind == HC_KEY_SPACE || request.kind == HC_KEY_BOUNDARY) {
                     state.lastCommitTrailingChars = output.empty() ? 0 : 1;
                     event.inputContext()->forwardKey(event.rawKey(), event.isRelease(), event.time());
@@ -847,9 +854,11 @@ private:
 
     void configureHanNomOptions(void* session) {
         if (session == nullptr) return;
-        HC_HanNomOptions options{static_cast<uint8_t>(*config_.behavior->phrasePrediction),
-                                 static_cast<uint8_t>(*config_.behavior->learnPhraseRanking), nullptr};
-        hc_session_set_hannom_options(session, &options);
+        const auto& phrasePath = *config_.dictionary->hanNomPhraseDictionaryPath;
+        HC_HanNomOptionsV2 options{static_cast<uint8_t>(*config_.behavior->phrasePrediction),
+                                   static_cast<uint8_t>(*config_.behavior->learnPhraseRanking), nullptr,
+                                   phrasePath.empty() ? nullptr : phrasePath.c_str()};
+        hc_session_set_hannom_options_v2(session, &options);
     }
 
     void resetAllSessions() {
@@ -890,6 +899,7 @@ private:
         if (state.surroundingTextEnabled) {
             commitViaSurroundingText(event.inputContext(), state, commitResult.text);
         } else if (!commitResult.text.empty()) {
+            clearPreedit(event.inputContext());
             event.inputContext()->commitString(commitResult.text);
         }
         state.hasActivePreedit = false;
@@ -897,7 +907,6 @@ private:
         state.lastCommitTrailingChars = 0;
         state.previousSurroundingText.clear();
         state.surroundingTextEnabled = false;
-        clearPreedit(event.inputContext());
     }
 
     bool tryReconvertLastCommitFromBackspace(KeyEvent& event, ContextState& state, int32_t mode, bool useSurroundingText) {
@@ -939,7 +948,7 @@ private:
         event.filterAndAccept();
     }
 
-    void updateHanNomPhase(ContextState& state, const HC_KeyRequest&, const HC_HanNomResultV2& nomResult) {
+    void updateHanNomPhase(ContextState& state, const HC_KeyRequest&, const HC_HanNomResultV3& nomResult) {
         state.hanNomCandidatePhase = nomResult.status_flag != HC_STATUS_COMMIT &&
             nomResult.error_code >= 0 && nomResult.candidate_count > 0;
     }
@@ -956,9 +965,9 @@ private:
         if (!ensureHanNomCandidatePhase(ic, state, mode, useSurroundingText)) return false;
 
         HC_KeyRequest enterRequest = makeKeyRequest(HC_KEY_ENTER, nullptr, mode);
-        HC_HanNomResultV2 nomResult;
+        HC_HanNomResultV3 nomResult;
         std::memset(&nomResult, 0, sizeof(nomResult));
-        if (hc_session_handle_key_hannom_v2(state.session.ptr, &enterRequest, &nomResult) == 0) {
+        if (hc_session_handle_key_hannom_v3(state.session.ptr, &enterRequest, &nomResult) == 0) {
             return false;
         }
 
@@ -967,12 +976,13 @@ private:
         return true;
     }
 
-    void updateHanNomUi(InputContext* ic, ContextState& state, const HC_HanNomResultV2& nomResult, bool useSurroundingText) {
+    void updateHanNomUi(InputContext* ic, ContextState& state, const HC_HanNomResultV3& nomResult, bool useSurroundingText) {
         if (nomResult.status_flag == HC_STATUS_COMMIT) {
             std::string output(reinterpret_cast<const char*>(nomResult.reading), nomResult.reading_len);
             if (useSurroundingText) {
                 commitViaSurroundingText(ic, state, output);
             } else {
+                clearPreedit(ic);
                 ic->commitString(output);
             }
             state.hasActivePreedit = false;
@@ -980,7 +990,6 @@ private:
             state.lastCommitTrailingChars = 0;
             state.previousSurroundingText.clear();
             state.surroundingTextEnabled = false;
-            clearPreedit(ic);
             ic->inputPanel().setCandidateList(nullptr);
             ic->updateUserInterface(UserInterfaceComponent::InputPanel, true);
             return;
@@ -994,12 +1003,12 @@ private:
                 auto candidateList = std::make_unique<CommonCandidateList>();
                 candidateList->setLabels({"1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9."});
                 candidateList->setPageSize(9);
-                candidateList->setLayoutHint(CandidateLayoutHint::NotSet);
+                candidateList->setLayoutHint(CandidateLayoutHint::Vertical);
                 std::string readingStr(reinterpret_cast<const char*>(nomResult.reading), nomResult.reading_len);
 
                 for (uint16_t i = 0; i < nomResult.candidate_count; ++i) {
                     std::string candStr(reinterpret_cast<const char*>(nomResult.candidates[i].text), nomResult.candidates[i].text_len);
-                    Text wordText(candStr);
+                    Text wordText(candStr, TextFormatFlag::Bold);
                     std::string candidateReading(reinterpret_cast<const char*>(nomResult.candidates[i].reading), nomResult.candidates[i].reading_len);
                     Text commentText(!candidateReading.empty() ? candidateReading : readingStr);
                     candidateList->append<HcNomCandidateWord>(wordText, commentText, i, this);

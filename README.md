@@ -62,8 +62,10 @@ Notable settings include:
 ## Hán Nôm Input
 
 Choose `Hán Nôm (Telex)`, `Hán Nôm (VNI)`, or `Hán Nôm (VIQR)`. As you type a
-Vietnamese reading, HC_IME shows matching Hán Nôm candidates with labels
-`1.`–`9.`. Candidate comments show the full Vietnamese reading.
+Vietnamese reading, HC_IME shows bold Hán Nôm candidate glyphs with labels
+`1.`–`9.` and the full Vietnamese reading as a comment. Fcitx5 owns
+the candidate pages, so every ranked result remains available rather than
+being cut off after the first nine.
 
 HC_IME also predicts common two-word phrases. After typing the first reading,
 press `Space` once to start the second reading and show phrase typeahead.
@@ -73,7 +75,7 @@ can each be turned off in the Fcitx5 configuration or status area.
 
 | Key or action | Result |
 | --- | --- |
-| `1`–`9` | Commit the corresponding candidate on the current page. |
+| `1`–`9` | Commit the corresponding candidate on the current page in Telex/VIQR, or after candidate focus in VNI. Unfocused Hán Nôm VNI digits remain tone/shape composition triggers. |
 | `Space` after the first reading | Start phrase composition and show phrase predictions. |
 | `Space` during phrase composition | Commit the top phrase candidate followed by a literal space. |
 | `Enter` with no focused candidate | Commit the raw Quốc ngữ reading. |
@@ -84,10 +86,16 @@ can each be turned off in the Fcitx5 configuration or status area.
 | `Esc` / `Backspace` | Step back through phrase composition or editing. |
 
 The embedded character dictionary is built from Unihan, NomStandardization,
-cake_gao, and pearapple123. The phrase dictionary contains 409 validated
-two-word entries. Local ranking data contains only the normalized reading, the
-selected glyph phrase, a selection count, and a timestamp; it is bounded to
-2,048 entries and can be reset from the status area.
+cake_gao, and pearapple123. The phrase dictionary contains 11,153 validated
+two-word `(reading, glyphs)` pairs; alternatives for one reading are retained.
+Single-glyph and phrase selections share bounded local ranking data (normalized
+reading, glyphs, count, timestamp) and can be reset from the status area.
+
+`Dictionary/HanNomPhraseDictionaryPath` accepts an optional offline TSV with
+`reading<TAB>glyphs` rows. It accepts exactly two Vietnamese tokens and two
+CJK glyphs, ignores comments and malformed rows, and gives valid user rows
+priority. The loader is bounded to 2 MiB and 50,000 data rows and runs only on
+configuration/session reset, never while typing.
 
 ## Fcitx5 Configuration
 
@@ -102,6 +110,11 @@ and learning, dictionary paths, per-application rules, and output mode. The
 status area also exposes mode switches plus toggles for spell checking,
 auto-restore, underline, quick consonants, phrase prediction, phrase learning,
 and reset of local Hán Nôm learning.
+
+Candidate font size is controlled by the active Fcitx5 UI (ClassicUI or
+Kimpanel), not by HC_IME. A ClassicUI font change is global to all input
+methods; configure and verify it in the active UI rather than expecting a
+per-HC_IME font setting.
 
 To keep Bamboo installed while making HC_IME the default Vietnamese input
 method, set `hcime` as the default in the Fcitx5 profile and leave `bamboo` in
