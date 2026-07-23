@@ -74,7 +74,7 @@ can each be turned off in the Fcitx5 configuration or status area.
 
 | Key or action | Result |
 | --- | --- |
-| `1`–`9` | Commit the corresponding candidate on the current page in Telex/VIQR, or after candidate focus in VNI. Unfocused Hán Nôm VNI digits remain tone/shape composition triggers. |
+| `1`–`9` | Commit the corresponding candidate on the current page in Hán Nôm Telex/VIQR. In Hán Nôm VNI, digits always apply Vietnamese tone/shape composition; use the arrow keys and `Enter` to select a glyph. |
 | `Space` after the first reading | Start phrase composition and show phrase predictions. |
 | `Space` during phrase composition | Keep composing and leave phrase candidates visible. |
 | `Enter` with no focused candidate | Commit the top Hán Nôm candidate for a complete two-word phrase; otherwise commit the raw Quốc ngữ reading. |
@@ -114,8 +114,8 @@ Candidate font size and family fallbacks are controlled by the active Fcitx5 UI
 (ClassicUI or Kimpanel), not by HC_IME. A ClassicUI font change is global to all
 input methods; configure and verify it in the active UI rather than expecting a
 per-HC_IME font setting. The tested ClassicUI Pango font description is
-`Hanom PV,HAN NOM B,HAN NOM A,Noto Sans CJK SC,Jigmo,Jigmo2,Jigmo3 16`; the
-trailing `16` sets the candidate size, and HC_IME leaves the glyph text at the
+`Hanom PV,HAN NOM B,HAN NOM A,Noto Sans CJK SC,Jigmo,Jigmo2,Jigmo3 28`; the
+trailing `28` sets the candidate size, and HC_IME leaves the glyph text at the
 fonts' regular weight.
 
 To keep Bamboo installed while making HC_IME the default Vietnamese input

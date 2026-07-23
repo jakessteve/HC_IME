@@ -55,11 +55,11 @@ backed by the repository's tests or end-to-end smoke gate.
   correct global-index selection on later pages.
 - Interactive Candidate Navigation: Arrow keys (`Up`/`Down`/`Left`/`Right`)
   and `Tab`/`Shift+Tab` move the highlight cursor. Telex/VIQR accept `1`–`9`
-  for an unfocused visible candidate; in Hán Nôm VNI, unfocused digits remain
-  tone/shape composition triggers and numeric selection requires candidate
-  focus. Focused Enter commits the exact candidate. Unfocused Enter commits
-  the top Hán Nôm candidate for a complete two-word phrase, while a single
-  reading still commits the raw Quốc ngữ reading.
+  for a visible candidate; in Hán Nôm VNI, digits always remain tone/shape
+  composition triggers even when a candidate is focused, and glyph selection
+  uses the arrow keys plus `Enter`. Focused Enter commits the exact candidate.
+  Unfocused Enter commits the top Hán Nôm candidate for a complete two-word
+  phrase, while a single reading still commits the raw Quốc ngữ reading.
 - Hán Nôm phrase prediction: the bundled `HNPH` phrase dictionary contains
   11,153 validated two-word `(reading, glyphs)` pairs. The first `Space`
   separates the two readings; later `Space` presses do not commit and keep
@@ -163,7 +163,15 @@ New borrowed-output ABI:
 - Cross-process smart switch persistence (currently per-session only)
 
 ## Latest Verification
+- 2026-07-23: Rebuilt and installed the user-local addon with regular-weight
+  Hán Nôm candidate text, restarted Fcitx5 through its user-session controller,
+  and verified `CurrentUI=classicui` with the effective candidate font at size
+  28. The 145-test `scripts/e2e-smoke.sh` gate and bridge probe passed.
+- 2026-07-23: Fixed Hán Nôm VNI digit-routing bug where number keys (1-5 for tones, 6-9 for diacritics) were being intercepted as candidate selection instead of completing Vietnamese composition. Digits now always reach the core as composition triggers in HanNomVni mode. Candidate selection uses arrow keys + Enter exclusively.
 
+- 2026-07-23: `scripts/e2e-smoke.sh` passed after the Hán Nôm VNI digit-routing
+  fix. The bridge probe covers digits as composition triggers with and without
+  candidate focus, followed by arrow focus and exact `Enter` selection.
 - 2026-07-23: `scripts/e2e-smoke.sh` passed for the candidate/prediction upgrade with 145 Rust tests,
   Clippy, the Fcitx5 bridge probe, staged installation, metadata checks,
   runtime-linkage checks, ABI-export checks, and deterministic regeneration of
@@ -173,8 +181,8 @@ New borrowed-output ABI:
   `/home/heocop/.local/lib/fcitx5/libhc_core.so` with
   `FCITX_ADDON_DIRS=/home/heocop/.local/lib/fcitx5:/usr/lib/fcitx5` while
   preserving the original `XDG_DATA_DIRS`. `CurrentUI` reported `classicui`;
-  its live font is `Hanom PV,HAN NOM B,HAN NOM A,Noto Sans CJK SC,Jigmo,Jigmo2,Jigmo3 16`,
-  parsed by Pango as size 16.0 and regular weight 400, and the representative
+  its live font is `Hanom PV,HAN NOM B,HAN NOM A,Noto Sans CJK SC,Jigmo,Jigmo2,Jigmo3 28`,
+  parsed by Pango as size 28.0 and regular weight 400, and the representative
   Hán Nôm render contained no tofu glyph boxes.
 
 ## Related Docs

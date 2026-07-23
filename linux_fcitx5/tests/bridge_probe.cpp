@@ -123,15 +123,36 @@ int main() {
         require(send(engine, entry, ic, FcitxKey_1), "HanNom VNI tone digit reaches the core");
         require(ic.commits.empty(), "HanNom VNI unfocused tone digit does not select a candidate");
         require(ic.inputPanel().clientPreedit().toString() == "á", "HanNom VNI composes a plus 1 as á");
+    }
 
+    {
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        RawConfig config;
+        config.setValueByPath("InputMethod", "HanNomVni");
+        engine.setConfig(config);
+
+        require(send(engine, entry, ic, FcitxKey_a), "HanNom VNI focused-digit a accepted");
         require(send(engine, entry, ic, FcitxKey_Down), "HanNom VNI Down focuses a candidate");
         auto* candidates = ic.inputPanel().candidateList().get();
         require(candidates != nullptr && candidates->cursorIndex() >= 0,
-                "HanNom VNI focused candidate enables numeric selection");
+                "HanNom VNI candidate is focused before its tone trigger");
+        require(send(engine, entry, ic, FcitxKey_1), "HanNom VNI focused tone digit reaches the core");
+        require(ic.commits.empty(), "HanNom VNI focused tone digit does not select a candidate");
+        require(ic.inputPanel().clientPreedit().toString() == "á",
+                "HanNom VNI focused a plus 1 composes as á");
+
+        require(send(engine, entry, ic, FcitxKey_Down), "HanNom VNI Down focuses the refreshed candidates");
+        candidates = ic.inputPanel().candidateList().get();
+        require(candidates != nullptr && candidates->cursorIndex() >= 0,
+                "HanNom VNI refreshed candidate is focused for Enter");
         const auto focused = candidateText(*candidates, candidates->cursorIndex());
-        require(send(engine, entry, ic, FcitxKey_1), "HanNom VNI focused numeric candidate selection accepted");
+        require(send(engine, entry, ic, FcitxKey_Return), "HanNom VNI focused Enter selection accepted");
         require(ic.commits.size() == 1 && ic.commits.back() == focused,
-                "HanNom VNI focused numeric digit selects the visible candidate");
+                "HanNom VNI Enter selects the exact focused candidate");
     }
 
     {

@@ -558,11 +558,11 @@ public:
                     event.filterAndAccept();
                     return;
                 }
-            // VNI digits are composition triggers while the candidate list is
-            // merely showing live reading suggestions. Once the user focuses a
-            // candidate, they explicitly enter candidate-selection semantics.
+            // Hán Nôm VNI digits always belong to Vietnamese composition, even
+            // while a candidate is focused. Candidate selection stays on the
+            // navigation keys plus Enter so tone/shape digits reach the core.
             } else if (candidateList != nullptr && input.size() == 1 && input[0] >= '1' && input[0] <= '9' &&
-                       (mode != 4 || candidateList->cursorIndex() >= 0)) {
+                       mode != 4) {
                 const int index = input[0] - '1';
                 if (index < candidateList->size()) {
                     candidateList->candidate(index).select(ic);
