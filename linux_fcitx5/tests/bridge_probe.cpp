@@ -97,6 +97,12 @@ static std::string candidateText(const CandidateList& candidates, int index) {
     return candidates.candidate(index).text().toString();
 }
 
+static bool candidateTextSegmentHasFormat(const CandidateList& candidates, int index, int segment,
+                                          TextFormatFlag flag) {
+    const auto& text = candidates.candidate(index).text();
+    return segment >= 0 && static_cast<size_t>(segment) < text.size() && text.formatAt(segment).test(flag);
+}
+
 static bool candidateCommentEmpty(const CandidateList& candidates, int index) {
     return candidates.candidate(index).comment().empty();
 }
@@ -536,6 +542,8 @@ int main() {
         require(ic.inputPanel().candidateList() != nullptr, "HanNom nav live candidateList exists before Space");
         auto* liveCandidates = ic.inputPanel().candidateList().get();
         require(liveCandidates->size() > 1, "HanNom nav reading has at least two live candidates");
+        require(candidateTextSegmentHasFormat(*liveCandidates, 0, 0, TextFormatFlag::Bold),
+                "HanNom candidate text segment zero is bold");
         require(candidateCommentEmpty(*liveCandidates, 0), "HanNom nav candidates do not show Vietnamese comments");
 
         require(send(engine, entry, ic, FcitxKey_Down), "HanNom Down highlights first live candidate");
