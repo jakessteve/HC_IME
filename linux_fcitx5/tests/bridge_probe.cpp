@@ -97,6 +97,10 @@ static std::string candidateText(const CandidateList& candidates, int index) {
     return candidates.candidate(index).text().toString();
 }
 
+static bool candidateCommentEmpty(const CandidateList& candidates, int index) {
+    return candidates.candidate(index).comment().empty();
+}
+
 static std::vector<Action*> hcimeStatusActions(MockInputContext& ic) {
     return ic.statusArea().actions(StatusGroup::InputMethod);
 }
@@ -449,6 +453,8 @@ int main() {
         require(ic.inputPanel().clientPreedit().toString() == "thiên", "HanNom 7 Telex composes reading thiên");
         require(ic.inputPanel().candidateList() != nullptr, "HanNom live reading populates candidateList before Space");
         require(ic.inputPanel().candidateList()->size() > 0, "HanNom live reading candidateList is non-empty before Space");
+        require(candidateCommentEmpty(*ic.inputPanel().candidateList(), 0),
+                "HanNom live reading candidates do not show Vietnamese comments");
 
         require(send(engine, entry, ic, FcitxKey_Return), "HanNom raw Enter without highlight accepted");
         require(ic.commits.size() == 1 && ic.commits.back() == "thiên", "HanNom raw Enter without highlight commits reading");
@@ -509,6 +515,7 @@ int main() {
         require(ic.inputPanel().candidateList() != nullptr, "HanNom nav live candidateList exists before Space");
         auto* liveCandidates = ic.inputPanel().candidateList().get();
         require(liveCandidates->size() > 1, "HanNom nav reading has at least two live candidates");
+        require(candidateCommentEmpty(*liveCandidates, 0), "HanNom nav candidates do not show Vietnamese comments");
 
         require(send(engine, entry, ic, FcitxKey_Down), "HanNom Down highlights first live candidate");
         require(send(engine, entry, ic, FcitxKey_Down), "HanNom second Down highlights second live candidate");
@@ -575,6 +582,8 @@ int main() {
         }
         require(ic.inputPanel().candidateList() != nullptr, "exact phrase keeps candidates visible");
         require(candidateText(*ic.inputPanel().candidateList(), 0) == "城庯", "phrase candidate renders full glyph string");
+        require(candidateCommentEmpty(*ic.inputPanel().candidateList(), 0),
+                "phrase candidates do not show Vietnamese comments");
         require(send(engine, entry, ic, FcitxKey_Down), "phrase arrow focuses candidate");
         require(send(engine, entry, ic, FcitxKey_Return), "phrase focused Enter accepted");
         require(ic.commits.size() == 1 && ic.commits.back() == "城庯", "phrase focused Enter commits full candidate");

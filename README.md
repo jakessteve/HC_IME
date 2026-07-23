@@ -62,10 +62,9 @@ Notable settings include:
 ## Hán Nôm Input
 
 Choose `Hán Nôm (Telex)`, `Hán Nôm (VNI)`, or `Hán Nôm (VIQR)`. As you type a
-Vietnamese reading, HC_IME shows bold Hán Nôm candidate glyphs with labels
-`1.`–`9.` and the full Vietnamese reading as a comment. Fcitx5 owns
-the candidate pages, so every ranked result remains available rather than
-being cut off after the first nine.
+Vietnamese reading, HC_IME shows bold Hán Nôm candidate glyph rows with labels
+`1.`–`9.`. Fcitx5 owns the candidate pages, so every ranked result remains
+available rather than being cut off after the first nine.
 
 HC_IME also predicts common two-word phrases. After typing the first reading,
 press `Space` once to start the second reading and show phrase typeahead.
@@ -111,9 +110,9 @@ status area also exposes mode switches plus toggles for spell checking,
 auto-restore, underline, quick consonants, phrase prediction, phrase learning,
 and reset of local Hán Nôm learning.
 
-Candidate font size is controlled by the active Fcitx5 UI (ClassicUI or
-Kimpanel), not by HC_IME. A ClassicUI font change is global to all input
-methods; configure and verify it in the active UI rather than expecting a
+Candidate font size and family fallbacks are controlled by the active Fcitx5 UI
+(ClassicUI or Kimpanel), not by HC_IME. A ClassicUI font change is global to all
+input methods; configure and verify it in the active UI rather than expecting a
 per-HC_IME font setting.
 
 To keep Bamboo installed while making HC_IME the default Vietnamese input

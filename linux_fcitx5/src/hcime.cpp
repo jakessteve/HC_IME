@@ -1004,14 +1004,11 @@ private:
                 candidateList->setLabels({"1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9."});
                 candidateList->setPageSize(9);
                 candidateList->setLayoutHint(CandidateLayoutHint::Vertical);
-                std::string readingStr(reinterpret_cast<const char*>(nomResult.reading), nomResult.reading_len);
 
                 for (uint16_t i = 0; i < nomResult.candidate_count; ++i) {
                     std::string candStr(reinterpret_cast<const char*>(nomResult.candidates[i].text), nomResult.candidates[i].text_len);
                     Text wordText(candStr, TextFormatFlag::Bold);
-                    std::string candidateReading(reinterpret_cast<const char*>(nomResult.candidates[i].reading), nomResult.candidates[i].reading_len);
-                    Text commentText(!candidateReading.empty() ? candidateReading : readingStr);
-                    candidateList->append<HcNomCandidateWord>(wordText, commentText, i, this);
+                    candidateList->append<HcNomCandidateWord>(wordText, Text(), i, this);
                 }
                 ic->inputPanel().setCandidateList(std::move(candidateList));
             } else {
