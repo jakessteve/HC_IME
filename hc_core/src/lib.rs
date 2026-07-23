@@ -337,17 +337,7 @@ impl Session {
                     self.populate_nom_result_v2(result, 1);
                     return 1;
                 }
-                self.rebuild_phrase_candidates();
-                let reading = normalize_phrase_reading(&self.phrase_reading());
-                let output = self
-                    .phrase_candidates
-                    .first()
-                    .map(|candidate| candidate.text.clone())
-                    .unwrap_or_else(|| reading.clone());
-                if !self.phrase_candidates.is_empty() {
-                    self.record_phrase_selection(&reading, &output);
-                }
-                self.commit_phrase_text(format!("{output} "), reading, result);
+                self.populate_nom_result_v2(result, 1);
                 1
             }
             HCKeyKind::Enter => {
@@ -355,7 +345,20 @@ impl Session {
                     return 0;
                 }
                 let raw = normalize_phrase_reading(&self.phrase_reading());
-                self.commit_phrase_text(raw.clone(), String::new(), result);
+                if self.phrase_first.is_some() && !self.buffer.is_empty() {
+                    self.rebuild_phrase_candidates();
+                    let output = self
+                        .phrase_candidates
+                        .first()
+                        .map(|candidate| candidate.text.clone())
+                        .unwrap_or_else(|| raw.clone());
+                    if !self.phrase_candidates.is_empty() {
+                        self.record_phrase_selection(&raw, &output);
+                    }
+                    self.commit_phrase_text(output, raw, result);
+                } else {
+                    self.commit_phrase_text(raw, String::new(), result);
+                }
                 1
             }
             HCKeyKind::Printable => {

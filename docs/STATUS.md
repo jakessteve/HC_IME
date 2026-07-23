@@ -1,15 +1,15 @@
 # HC_IME Status
 
 This document is the local source of truth for the current repo snapshot.
-It reflects the `f1968d1` codebase snapshot and records only behavior backed
-by the repository's tests or end-to-end smoke gate.
+It reflects the current worktree rooted at `de2b55b` and records only behavior
+backed by the repository's tests or end-to-end smoke gate.
 
 ## Current Shape
 
 - Rust core in `hc_core/` implements Telex, VNI, and VIQR composition.
 - `linux_fcitx5/` provides the Fcitx5 addon, metadata, and install rules.
 - `scripts/e2e-smoke.sh` is the repo's local end-to-end validation gate.
-- `README.md` is the Vietnamese user guide for architecture, Hán Nôm workflow,
+- `README.md` is the English user guide for architecture, Hán Nôm workflow,
   configuration, build, and validation.
 
 ## Validated Behaviors
@@ -48,9 +48,26 @@ by the repository's tests or end-to-end smoke gate.
     prediction; the addon has a bridge-probe suite.
   - Verification (E7): `scripts/e2e-smoke.sh` is the current end-to-end gate;
     its fresh result is recorded below after each documentation sync.
-- CJK IME UX Alignment: V3 returns up to 256 ranked candidates and delegates paging to Fcitx5 `CommonCandidateList`; the bridge displays vertical nine-item pages with bold glyph text, native buttons/wheel paging, `PageUp`/`PageDown`, `=`, `-`, `[`, `]`, and correct global-index selection on later pages.
-- Interactive Candidate Navigation: Arrow keys (`Up`/`Down`/`Left`/`Right`) and `Tab`/`Shift+Tab` move the highlight cursor. Telex/VIQR accept `1`–`9` for an unfocused visible candidate; in Hán Nôm VNI, unfocused digits remain tone/shape composition triggers and numeric selection requires candidate focus. Focused Enter commits the candidate and unfocused Enter commits the raw Quốc ngữ reading.
-- Hán Nôm phrase prediction: the bundled `HNPH` phrase dictionary contains 11,153 validated two-word `(reading, glyphs)` pairs. Exact phrases outrank prefix predictions and the 3×3 single-glyph fallback; alternate glyph sequences are retained. Optional bounded user TSV phrases rank first, accept only two valid normalized Vietnamese tokens and two CJK glyphs, and reload on options update or explicit session reset.
+- CJK IME UX Alignment: V3 returns up to 256 ranked candidates and delegates
+  paging to Fcitx5 `CommonCandidateList`; the bridge displays vertical
+  nine-item pages with regular-weight glyph text, empty Vietnamese comments,
+  native buttons/wheel paging, `PageUp`/`PageDown`, `=`, `-`, `[`, `]`, and
+  correct global-index selection on later pages.
+- Interactive Candidate Navigation: Arrow keys (`Up`/`Down`/`Left`/`Right`)
+  and `Tab`/`Shift+Tab` move the highlight cursor. Telex/VIQR accept `1`–`9`
+  for an unfocused visible candidate; in Hán Nôm VNI, unfocused digits remain
+  tone/shape composition triggers and numeric selection requires candidate
+  focus. Focused Enter commits the exact candidate. Unfocused Enter commits
+  the top Hán Nôm candidate for a complete two-word phrase, while a single
+  reading still commits the raw Quốc ngữ reading.
+- Hán Nôm phrase prediction: the bundled `HNPH` phrase dictionary contains
+  11,153 validated two-word `(reading, glyphs)` pairs. The first `Space`
+  separates the two readings; later `Space` presses do not commit and keep
+  phrase candidates visible. Exact phrases outrank prefix predictions and the
+  3×3 single-glyph fallback; alternate glyph sequences are retained. Optional
+  bounded user TSV phrases rank first, accept only two valid normalized
+  Vietnamese tokens and two CJK glyphs, and reload on options update or
+  explicit session reset.
 - Hán Nôm ABI: V3 (`HC_HanNomResultV3`, V3 key handler, and absolute selector) is additive. V1/V2 structures, exports, and core-owned V2 paging remain unchanged. Borrowed V3 text lasts through the next Hán Nôm call on the same session or session destruction.
 - Local Hán Nôm learning ranks both single glyphs and phrases, remains bounded to 2,048 entries with atomic 0600 writes, resets both categories from the status menu, and never performs file I/O on the typing path.
 - Fcitx5 UI Lifecycle Fix: `updateHanNomUi` now calls `setCandidateList()`, then `setPreedit()`/`updatePreedit()`, then `updateUserInterface()`, so the candidate popup and client preedit are refreshed together during live Hán Nôm prediction.
@@ -147,10 +164,18 @@ New borrowed-output ABI:
 
 ## Latest Verification
 
-- 2026-07-23: `scripts/e2e-smoke.sh` passed for the candidate/prediction upgrade with 144 Rust tests,
+- 2026-07-23: `scripts/e2e-smoke.sh` passed for the candidate/prediction upgrade with 145 Rust tests,
   Clippy, the Fcitx5 bridge probe, staged installation, metadata checks,
   runtime-linkage checks, ABI-export checks, and deterministic regeneration of
   both bundled Hán Nôm binaries.
+- 2026-07-23: the user-local addon was installed and live Fcitx5 PID 66753
+  mapped `/home/heocop/.local/lib/fcitx5/libhcime.so` and
+  `/home/heocop/.local/lib/fcitx5/libhc_core.so` with
+  `FCITX_ADDON_DIRS=/home/heocop/.local/lib/fcitx5:/usr/lib/fcitx5` while
+  preserving the original `XDG_DATA_DIRS`. `CurrentUI` reported `classicui`;
+  its live font is `Hanom PV,HAN NOM B,HAN NOM A,Noto Sans CJK SC,Jigmo,Jigmo2,Jigmo3 16`,
+  parsed by Pango as size 16.0 and regular weight 400, and the representative
+  Hán Nôm render contained no tofu glyph boxes.
 
 ## Related Docs
 

@@ -584,9 +584,19 @@ int main() {
         require(candidateText(*ic.inputPanel().candidateList(), 0) == "城庯", "phrase candidate renders full glyph string");
         require(candidateCommentEmpty(*ic.inputPanel().candidateList(), 0),
                 "phrase candidates do not show Vietnamese comments");
-        require(send(engine, entry, ic, FcitxKey_Down), "phrase arrow focuses candidate");
-        require(send(engine, entry, ic, FcitxKey_Return), "phrase focused Enter accepted");
-        require(ic.commits.size() == 1 && ic.commits.back() == "城庯", "phrase focused Enter commits full candidate");
+        require(ic.inputPanel().candidateList()->cursorIndex() == -1,
+                "exact phrase starts without a focus highlight");
+        require(send(engine, entry, ic, FcitxKey_space), "second phrase Space accepted");
+        require(ic.commits.empty(), "second phrase Space does not commit");
+        require(ic.inputPanel().candidateList() != nullptr && ic.inputPanel().candidateList()->size() > 0,
+                "second phrase Space keeps candidates visible");
+        require(candidateText(*ic.inputPanel().candidateList(), 0) == "城庯",
+                "second phrase Space preserves the top candidate");
+        require(ic.inputPanel().candidateList()->cursorIndex() == -1,
+                "second phrase Space keeps the candidate list unfocused");
+        require(send(engine, entry, ic, FcitxKey_Return), "phrase unfocused Enter accepted");
+        require(ic.commits.size() == 1 && ic.commits.back() == "城庯",
+                "phrase unfocused Enter commits the top candidate");
     }
 
     std::cout << "HC_IME bridge probe passed\n";

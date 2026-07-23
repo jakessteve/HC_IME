@@ -3010,7 +3010,7 @@ fn hannom_v2_converts_common_two_word_phrase_and_predicts() {
 }
 
 #[test]
-fn hannom_v2_space_commits_phrase_with_delimiter_and_v1_remains_available() {
+fn hannom_v2_second_space_keeps_phrase_candidates_and_enter_commits_top_candidate() {
     let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
     let mut req = key_request(InputMode::HanNomTelex);
     let mut result: HC_HanNomResultV2 = unsafe { std::mem::zeroed() };
@@ -3032,7 +3032,21 @@ fn hannom_v2_space_commits_phrase_with_delimiter_and_v1_remains_available() {
     }
     req.kind = HCKeyKind::Space as i32;
     hc_session_handle_key_hannom_v2(session, &req, &mut result);
-    assert_eq!(v2_text(&result), "大學 ");
+    assert_eq!(result.status_flag, HCStatusFlag::InProgress as i32);
+    assert!(result.candidate_count > 0);
+    let top = unsafe { &*result.candidates };
+    let top = unsafe {
+        std::str::from_utf8(std::slice::from_raw_parts(top.text, top.text_len as usize)).unwrap()
+    };
+    assert_eq!(top, "大學");
+    assert_eq!(v2_text(&result), "đại học");
+
+    req.kind = HCKeyKind::Enter as i32;
+    req.text = ptr::null();
+    hc_session_handle_key_hannom_v2(session, &req, &mut result);
+    assert_eq!(result.status_flag, HCStatusFlag::Commit as i32);
+    assert_eq!(v2_text(&result), "大學");
+
     let mut v1: HC_HanNomResult = unsafe { std::mem::zeroed() };
     assert_eq!(
         hc_session_handle_key_hannom(session, &req, &mut v1),
@@ -3269,6 +3283,56 @@ fn hannom_v3_exposes_full_candidates_and_selects_absolute_index() {
         }),
         page_two
     );
+    hc_session_free(session);
+}
+
+#[test]
+fn hannom_v3_second_space_keeps_phrase_candidates_and_enter_commits_top_candidate() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut result: HC_HanNomResultV3 = unsafe { std::mem::zeroed() };
+
+    for ch in "thành".chars() {
+        let key = c(&ch.to_string());
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = key.as_ptr();
+        hc_session_handle_key_hannom_v3(session, &req, &mut result);
+    }
+    let space = c(" ");
+    req.kind = HCKeyKind::Space as i32;
+    req.text = space.as_ptr();
+    hc_session_handle_key_hannom_v3(session, &req, &mut result);
+    for ch in "phố".chars() {
+        let key = c(&ch.to_string());
+        req.kind = HCKeyKind::Printable as i32;
+        req.text = key.as_ptr();
+        hc_session_handle_key_hannom_v3(session, &req, &mut result);
+    }
+
+    req.kind = HCKeyKind::Space as i32;
+    req.text = space.as_ptr();
+    hc_session_handle_key_hannom_v3(session, &req, &mut result);
+    assert_eq!(result.status_flag, HCStatusFlag::InProgress as i32);
+    assert!(result.candidate_count > 0);
+    assert_eq!(v3_candidate_text(&result, 0), "城庯");
+
+    req.kind = HCKeyKind::Enter as i32;
+    req.text = ptr::null();
+    hc_session_handle_key_hannom_v3(session, &req, &mut result);
+    assert_eq!(result.status_flag, HCStatusFlag::Commit as i32);
+    assert_eq!(
+        v2_text(&HC_HanNomResultV2 {
+            status_flag: result.status_flag,
+            error_code: result.error_code,
+            reading: result.reading,
+            reading_len: result.reading_len,
+            candidates: ptr::null(),
+            candidate_count: 0,
+            handled: result.handled,
+        }),
+        "城庯"
+    );
+
     hc_session_free(session);
 }
 

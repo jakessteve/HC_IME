@@ -1007,7 +1007,7 @@ private:
 
                 for (uint16_t i = 0; i < nomResult.candidate_count; ++i) {
                     std::string candStr(reinterpret_cast<const char*>(nomResult.candidates[i].text), nomResult.candidates[i].text_len);
-                    Text wordText(candStr, TextFormatFlag::Bold);
+                    Text wordText(candStr);
                     candidateList->append<HcNomCandidateWord>(wordText, Text(), i, this);
                 }
                 ic->inputPanel().setCandidateList(std::move(candidateList));

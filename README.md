@@ -62,7 +62,7 @@ Notable settings include:
 ## Hán Nôm Input
 
 Choose `Hán Nôm (Telex)`, `Hán Nôm (VNI)`, or `Hán Nôm (VIQR)`. As you type a
-Vietnamese reading, HC_IME shows bold Hán Nôm candidate glyph rows with labels
+Vietnamese reading, HC_IME shows Hán Nôm candidate glyph rows with labels
 `1.`–`9.`. Fcitx5 owns the candidate pages, so every ranked result remains
 available rather than being cut off after the first nine.
 
@@ -76,8 +76,8 @@ can each be turned off in the Fcitx5 configuration or status area.
 | --- | --- |
 | `1`–`9` | Commit the corresponding candidate on the current page in Telex/VIQR, or after candidate focus in VNI. Unfocused Hán Nôm VNI digits remain tone/shape composition triggers. |
 | `Space` after the first reading | Start phrase composition and show phrase predictions. |
-| `Space` during phrase composition | Commit the top phrase candidate followed by a literal space. |
-| `Enter` with no focused candidate | Commit the raw Quốc ngữ reading. |
+| `Space` during phrase composition | Keep composing and leave phrase candidates visible. |
+| `Enter` with no focused candidate | Commit the top Hán Nôm candidate for a complete two-word phrase; otherwise commit the raw Quốc ngữ reading. |
 | `Enter` with a focused candidate | Commit the focused Hán Nôm character or phrase. |
 | Arrow keys, `Tab`, `Shift+Tab` | Move the candidate focus. |
 | `PageUp` / `PageDown`, `-` / `=`, `[` / `]` | Change candidate pages. |
@@ -113,7 +113,10 @@ and reset of local Hán Nôm learning.
 Candidate font size and family fallbacks are controlled by the active Fcitx5 UI
 (ClassicUI or Kimpanel), not by HC_IME. A ClassicUI font change is global to all
 input methods; configure and verify it in the active UI rather than expecting a
-per-HC_IME font setting.
+per-HC_IME font setting. The tested ClassicUI Pango font description is
+`Hanom PV,HAN NOM B,HAN NOM A,Noto Sans CJK SC,Jigmo,Jigmo2,Jigmo3 16`; the
+trailing `16` sets the candidate size, and HC_IME leaves the glyph text at the
+fonts' regular weight.
 
 To keep Bamboo installed while making HC_IME the default Vietnamese input
 method, set `hcime` as the default in the Fcitx5 profile and leave `bamboo` in
