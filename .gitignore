@@ -18,3 +18,5 @@ Thumbs.db
 # CMake and compiler detritus that may appear outside build trees
 compile_commands.json
 cmake-build-*/
+
+/CLAUDE.md

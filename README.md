@@ -122,7 +122,72 @@ To keep Bamboo installed while making HC_IME the default Vietnamese input
 method, set `hcime` as the default in the Fcitx5 profile and leave `bamboo` in
 the same input-method group.
 
-## Build and Install
+## Install
+
+### Quick install (Debian and Ubuntu)
+
+For a clean machine that has no Rust, Fcitx5, or CJK fonts yet, run the guided
+installer from the repository root:
+
+```bash
+./scripts/install.sh
+```
+
+It detects the distribution and, on Debian, Ubuntu, and derivatives, hands off
+to `scripts/install-debian.sh`, which installs the apt build and runtime
+dependencies plus the Hán Nôm fonts, builds the Rust core and the Fcitx5 addon,
+installs them system-wide, and wires HC_IME into your Fcitx5 session as the
+default input method. On other distributions it prints the exact dependency and
+build steps to run by hand.
+
+You can run it either way; both work, and it does not have to be run as root:
+
+```bash
+./scripts/install.sh          # sudo is used only for apt and `cmake --install`
+sudo ./scripts/install.sh     # the build and every ~/.config change run as you
+```
+
+Common options (see `./scripts/install.sh --help` for all of them):
+
+| Option | Effect |
+| --- | --- |
+| `-y`, `--yes` | Do not prompt for confirmation. |
+| `--skip-tests` | Skip `cargo test` before building. |
+| `--no-fonts` | Do not install the Hán Nôm CJK fonts. |
+| `--no-config` | Install only; do not touch your Fcitx5 configuration. |
+| `--uninstall` | Remove a previous installation made by the script. |
+
+Every configuration file the installer changes is backed up next to the
+original with a `.hcime-backup-<timestamp>` suffix. After it finishes, switch
+input methods with `Ctrl+Space` and open `fcitx5-configtool` to choose
+Telex / VNI / VIQR or a Hán Nôm mode. If applications do not pick up the input
+method, log out and back in.
+
+**If you currently use IBus (the Ubuntu default) or any framework other than
+Fcitx5**, HC_IME will not respond until you make Fcitx5 the active input
+framework. The installer does not switch it for you; run this and then log out
+and back in:
+
+```bash
+im-config -n fcitx5   # switch back later with: im-config -n ibus
+```
+
+The installer prints this reminder at the end when it detects an IBus session.
+
+> **Ubuntu 24.04 note.** The Fcitx5 packaged in 24.04 may be older than the
+> version this addon targets (`hcime.conf` declares `core:5.1.19`). Fcitx5
+> refuses to load an addon whose declared dependency is newer than the running
+> core, so on stock 24.04 the addon may build but never load. Check with:
+>
+> ```bash
+> pkg-config --modversion Fcitx5Core   # compare against 5.1.19
+> ```
+>
+> The installer warns when it detects an older version. If it is below 5.1.19,
+> install a newer Fcitx5 (from a PPA or by building from source) and re-run.
+> Ubuntu 26.04 ships a recent enough Fcitx5.
+
+### Manual build and install
 
 Requirements: Rust/Cargo, CMake, Ninja, Fcitx5, and the Fcitx5 development
 packages.
