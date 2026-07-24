@@ -9,6 +9,10 @@
 # Works run either way; arguments are passed straight through:
 #   ./scripts/install.sh [options]
 #   sudo ./scripts/install.sh [options]
+#
+# This is the once-per-machine entry point. To pick up a code change on a machine
+# that is already set up, use scripts/update.sh, which rebuilds and reinstalls
+# without redoing the dependencies or your Fcitx5 configuration.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

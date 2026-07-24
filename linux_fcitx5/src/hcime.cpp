@@ -76,12 +76,21 @@ struct ContextState {
     SessionHandle session;
     bool hasActivePreedit = false;
     bool hanNomCandidatePhase = false;
+    // Text handed to the client by the last commit, and how many boundary
+    // characters followed it. Both are needed before the engine may take that
+    // text back out of the document to reopen it as a preedit.
+    std::string lastCommitText;
     unsigned int lastCommitTrailingChars = 0;
     bool surroundingTextEnabled = false;
     PerAppMode perAppMode = PerAppMode::Global;
     SmartSwitchState smartSwitchState = SmartSwitchState::Unknown;
     std::string previousSurroundingText;
 };
+
+static void clearCommitTracking(ContextState& state) {
+    state.lastCommitText.clear();
+    state.lastCommitTrailingChars = 0;
+}
 
 enum class HcImeInputMode {
     Telex,
@@ -346,6 +355,45 @@ static SurroundingTextDelta computeSurroundingDiff(const std::string& oldText, c
     auto commonPrefixChars = static_cast<unsigned int>(utf8::length(oldText, 0, commonPrefixBytes));
     auto deleteChars = static_cast<unsigned int>(utf8::length(oldText) - commonPrefixChars);
     return {deleteChars, newText.substr(commonPrefixBytes)};
+}
+
+// True when the text right before the cursor is exactly the last commit plus
+// the boundary characters that followed it. Without this the engine would
+// delete whatever happens to sit before the cursor after the user clicked
+// somewhere else or the application edited the text on its own.
+static bool cursorTextMatchesLastCommit(InputContext* ic, const ContextState& state) {
+    const auto& surrounding = ic->surroundingText();
+    if (!surrounding.isValid() || surrounding.cursor() != surrounding.anchor()) return false;
+
+    const auto& text = surrounding.text();
+    if (!utf8::validate(text) || !utf8::validate(state.lastCommitText)) return false;
+
+    const auto committedChars = static_cast<unsigned int>(utf8::length(state.lastCommitText));
+    const auto expectedChars = committedChars + state.lastCommitTrailingChars;
+    const auto cursorChars = surrounding.cursor();
+    if (committedChars == 0 || cursorChars < expectedChars) return false;
+
+    const auto startBytes = utf8::ncharByteLength(text.begin(), cursorChars - expectedChars);
+    const auto endBytes = utf8::ncharByteLength(text.begin(), cursorChars - state.lastCommitTrailingChars);
+    return text.compare(startBytes, endBytes - startBytes, state.lastCommitText) == 0;
+}
+
+// The last commit may only be reopened when the client can hand it back and
+// can display the reopened word again; otherwise the word would be deleted
+// from the document and never reappear.
+static bool canReopenLastCommit(InputContext* ic, const ContextState& state, bool useSurroundingText) {
+    if (state.lastCommitText.empty()) return false;
+    const auto flags = ic->capabilityFlags();
+    if (!flags.test(CapabilityFlag::SurroundingText)) return false;
+    if (!useSurroundingText && !flags.test(CapabilityFlag::Preedit)) return false;
+    return cursorTextMatchesLastCommit(ic, state);
+}
+
+static void removeLastCommitFromDocument(InputContext* ic, ContextState& state) {
+    const auto deleteChars =
+        static_cast<unsigned int>(utf8::length(state.lastCommitText)) + state.lastCommitTrailingChars;
+    ic->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
+    clearCommitTracking(state);
 }
 
 static Utf8KeyResult handleKeyUtf8(void* session, const HC_KeyRequest* request) {
@@ -633,7 +681,7 @@ public:
             event.filterAndAccept();
             state.hasActivePreedit = false;
             state.hanNomCandidatePhase = false;
-            state.lastCommitTrailingChars = 0;
+            clearCommitTracking(state);
             state.previousSurroundingText.clear();
             state.surroundingTextEnabled = false;
             clearPreedit(event.inputContext());
@@ -652,9 +700,20 @@ public:
         }
 
         switch (result.statusFlag) {
-            case HC_STATUS_IN_PROGRESS:
             case HC_STATUS_RECONVERSION_ACTIVE:
-                state.lastCommitTrailingChars = 0;
+                // The core reopened the word it committed a moment ago, so the
+                // client still holds a copy of it. Take that copy back, or drop
+                // the reopen entirely and let the key through as a literal.
+                if (!state.lastCommitText.empty()) {
+                    if (!canReopenLastCommit(event.inputContext(), state, useSurroundingText)) {
+                        clearActivePreedit(event, state);
+                        return;
+                    }
+                    removeLastCommitFromDocument(event.inputContext(), state);
+                }
+                [[fallthrough]];
+            case HC_STATUS_IN_PROGRESS:
+                clearCommitTracking(state);
                 state.hasActivePreedit = !output.empty();
                 if (output.empty()) {
                     clearPreedit(event.inputContext());
@@ -668,32 +727,42 @@ public:
                 event.filterAndAccept();
                 return;
             case HC_STATUS_COMMIT:
-            case HC_STATUS_ENGLISH_FALLBACK:
+            case HC_STATUS_ENGLISH_FALLBACK: {
+                // A word boundary travels with the committed word instead of
+                // being forwarded as a key: forwarded keys and committed text
+                // take different paths to the client and can arrive out of
+                // order, which drops or misplaces the separator.
+                const bool boundaryFollowsCommit =
+                    (request.kind == HC_KEY_SPACE || request.kind == HC_KEY_BOUNDARY) && !output.empty() &&
+                    !input.empty();
+                const std::string committed = boundaryFollowsCommit ? output + input : output;
                 if (useSurroundingText) {
-                    commitViaSurroundingText(event.inputContext(), state, output);
+                    commitViaSurroundingText(event.inputContext(), state, committed);
                 } else {
                     clearPreedit(event.inputContext());
-                    event.inputContext()->commitString(output);
+                    event.inputContext()->commitString(committed);
                 }
                 updateSmartSwitch(state, appName, result.statusFlag);
                 state.hasActivePreedit = false;
                 state.hanNomCandidatePhase = false;
-                state.lastCommitTrailingChars = 0;
+                clearCommitTracking(state);
                 state.previousSurroundingText.clear();
                 state.surroundingTextEnabled = false;
-                if (request.kind == HC_KEY_SPACE || request.kind == HC_KEY_BOUNDARY) {
-                    state.lastCommitTrailingChars = output.empty() ? 0 : 1;
-                    event.inputContext()->forwardKey(event.rawKey(), event.isRelease(), event.time());
-                } else if (request.kind == HC_KEY_ENTER) {
+                if (boundaryFollowsCommit) {
+                    state.lastCommitText = output;
+                    state.lastCommitTrailingChars = static_cast<unsigned int>(utf8::length(input));
+                } else if (request.kind == HC_KEY_SPACE || request.kind == HC_KEY_BOUNDARY ||
+                           request.kind == HC_KEY_ENTER) {
                     event.inputContext()->forwardKey(event.rawKey(), event.isRelease(), event.time());
                 }
                 event.filterAndAccept();
                 return;
+            }
             default:
                 event.filterAndAccept();
                 state.hasActivePreedit = false;
                 state.hanNomCandidatePhase = false;
-                state.lastCommitTrailingChars = 0;
+                clearCommitTracking(state);
                 state.previousSurroundingText.clear();
                 state.surroundingTextEnabled = false;
                 clearPreedit(event.inputContext());
@@ -725,7 +794,7 @@ public:
         }
         state.hasActivePreedit = false;
         state.hanNomCandidatePhase = false;
-        state.lastCommitTrailingChars = 0;
+        clearCommitTracking(state);
         state.previousSurroundingText.clear();
         state.surroundingTextEnabled = false;
         clearPreedit(event.inputContext());
@@ -747,7 +816,7 @@ public:
         }
         state.hasActivePreedit = false;
         state.hanNomCandidatePhase = false;
-        state.lastCommitTrailingChars = 0;
+        clearCommitTracking(state);
         state.previousSurroundingText.clear();
         state.surroundingTextEnabled = false;
         clearPreedit(event.inputContext());
@@ -870,7 +939,7 @@ private:
             }
             state.hasActivePreedit = false;
             state.hanNomCandidatePhase = false;
-            state.lastCommitTrailingChars = 0;
+            clearCommitTracking(state);
             state.previousSurroundingText.clear();
             state.surroundingTextEnabled = false;
         }
@@ -886,7 +955,7 @@ private:
         if (state.session.ptr != nullptr) hc_session_reset(state.session.ptr);
         state.hasActivePreedit = false;
         state.hanNomCandidatePhase = false;
-        state.lastCommitTrailingChars = 0;
+        clearCommitTracking(state);
         state.previousSurroundingText.clear();
         state.surroundingTextEnabled = false;
         clearPreedit(event.inputContext());
@@ -904,27 +973,21 @@ private:
         }
         state.hasActivePreedit = false;
         state.hanNomCandidatePhase = false;
-        state.lastCommitTrailingChars = 0;
+        clearCommitTracking(state);
         state.previousSurroundingText.clear();
         state.surroundingTextEnabled = false;
     }
 
     bool tryReconvertLastCommitFromBackspace(KeyEvent& event, ContextState& state, int32_t mode, bool useSurroundingText) {
         if (state.session.ptr == nullptr || state.lastCommitTrailingChars == 0) return false;
-        const bool canDeleteSurrounding = useSurroundingText ||
-            (event.inputContext()->capabilityFlags().test(CapabilityFlag::SurroundingText) &&
-             (event.inputContext()->surroundingText().isValid() || state.lastCommitTrailingChars > 0));
-        if (!canDeleteSurrounding) return false;
+        if (!canReopenLastCommit(event.inputContext(), state, useSurroundingText)) return false;
         HC_KeyRequest request{makeKeyRequest(HC_KEY_BACKSPACE, nullptr, mode)};
         const Utf8KeyResult result = handleKeyUtf8(state.session.ptr, &request);
         if (result.handled == 0 || result.errorCode < 0 ||
             result.statusFlag != HC_STATUS_RECONVERSION_ACTIVE || result.text.empty()) {
             return false;
         }
-        const auto committedChars = static_cast<unsigned int>(utf8::length(result.text));
-        const auto deleteChars = committedChars + state.lastCommitTrailingChars;
-        event.inputContext()->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-        state.lastCommitTrailingChars = 0;
+        removeLastCommitFromDocument(event.inputContext(), state);
         state.hasActivePreedit = true;
         state.hanNomCandidatePhase = false;
         if (useSurroundingText) {
@@ -987,7 +1050,7 @@ private:
             }
             state.hasActivePreedit = false;
             state.hanNomCandidatePhase = false;
-            state.lastCommitTrailingChars = 0;
+            clearCommitTracking(state);
             state.previousSurroundingText.clear();
             state.surroundingTextEnabled = false;
             ic->inputPanel().setCandidateList(nullptr);
@@ -997,7 +1060,7 @@ private:
 
         if (nomResult.status_flag == HC_STATUS_IN_PROGRESS) {
             std::string output(reinterpret_cast<const char*>(nomResult.reading), nomResult.reading_len);
-            state.lastCommitTrailingChars = 0;
+            clearCommitTracking(state);
             state.hasActivePreedit = !output.empty();
             if (nomResult.candidate_count > 0 && nomResult.candidates != nullptr) {
                 auto candidateList = std::make_unique<CommonCandidateList>();

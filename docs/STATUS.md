@@ -79,6 +79,14 @@ backed by the repository's tests or end-to-end smoke gate.
 - The surrounding-text path includes a re-sync guard that detects when the
   application modifies surrounding text behind the IME and recovers cleanly
   by committing the new preedit directly instead of computing a stale diff.
+- Reopening the last commit — by backspace or by a VNI digit — requires the
+  client to expose surrounding text, to accept a preedit, and to still hold
+  exactly that word plus its boundary before the cursor. Otherwise the word
+  stays in the document: backspace behaves as an ordinary backspace and the
+  digit is typed literally, so text is never deleted without being restored.
+- A word boundary that commits a word (space or punctuation) is committed
+  together with that word instead of being forwarded as a key event, so the
+  separator cannot arrive out of order with the committed text.
 
 ## Cherry-Picked Features (from VMK + VKey + EVKey analysis)
 

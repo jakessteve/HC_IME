@@ -187,6 +187,34 @@ The installer prints this reminder at the end when it detects an IBus session.
 > install a newer Fcitx5 (from a PPA or by building from source) and re-run.
 > Ubuntu 26.04 ships a recent enough Fcitx5.
 
+### Updating after a code change
+
+Once a machine has been through the installer, changing the source does not call
+for another install. Run the updater instead:
+
+```bash
+./scripts/update.sh
+```
+
+
+It rebuilds the Rust core and the Fcitx5 addon incrementally, reinstalls them
+over the existing installation, and restarts Fcitx5. It never touches apt, the
+fonts, or anything under `~/.config`, so settings you have adjusted since the
+install — the candidate font, your input-method group, per-application rules —
+are left exactly as they are.
+
+| Option | Effect |
+| --- | --- |
+| `--skip-tests` | Skip `cargo test` before rebuilding. |
+| `--force` | Reinstall even when the rebuild produced no change. |
+
+When the rebuild produces nothing new, the updater says so and leaves the
+running Fcitx5 alone instead of restarting it. It refuses to run if it finds no
+previous installation (it looks for the manifest at
+`~/.local/share/hcime/install_manifest.txt`); run `./scripts/install.sh` first.
+On distributions other than Debian and Ubuntu it prints the equivalent rebuild
+commands.
+
 ### Manual build and install
 
 Requirements: Rust/Cargo, CMake, Ninja, Fcitx5, and the Fcitx5 development

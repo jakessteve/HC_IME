@@ -38,6 +38,8 @@ SKIP_TESTS=0
 WITH_FONTS=1
 DO_CONFIG=1
 DO_UNINSTALL=0
+DO_UPDATE=0
+FORCE=0
 FCITX5_STOPPED=0
 
 if [[ -t 1 ]]; then
@@ -68,6 +70,9 @@ Options:
       --skip-tests  Skip `cargo test` before building the addon.
       --no-fonts    Do not install the Hán Nôm CJK fonts.
       --no-config   Install only; do not touch your Fcitx5 configuration.
+      --update      Rebuild and reinstall an existing install only: no apt, no
+                    fonts, no changes under ~/.config. Use after editing code.
+      --force       With --update, reinstall even when the build is unchanged.
       --uninstall   Remove a previous installation made by this script.
   -h, --help        Show this help.
 
@@ -82,12 +87,18 @@ while [[ $# -gt 0 ]]; do
         --skip-tests) SKIP_TESTS=1 ;;
         --no-fonts)   WITH_FONTS=0 ;;
         --no-config)  DO_CONFIG=0 ;;
+        --update)     DO_UPDATE=1 ;;
+        --force)      FORCE=1 ;;
         --uninstall)  DO_UNINSTALL=1 ;;
         -h|--help)    usage; exit 0 ;;
         *)            usage >&2; die "unknown option: $1" ;;
     esac
     shift
 done
+
+if (( DO_UPDATE && DO_UNINSTALL )); then
+    usage >&2; die "--update and --uninstall do the opposite of each other; pick one."
+fi
 
 # ------------------------------------------------------- privilege plumbing --
 #
@@ -737,6 +748,9 @@ Next steps:
 Backups of anything this script changed are next to the originals with a
 .hcime-backup-$BACKUP_STAMP suffix.
 
+After a code change, do not run this installer again — rebuild and reinstall
+only, leaving your configuration alone:  scripts/update.sh
+
 To remove HC_IME again:  scripts/install-debian.sh --uninstall
 EOF
 
@@ -756,18 +770,126 @@ EOF
     fi
 }
 
+# ---------------------------------------------------------------- update --
+#
+# The fast path for "I changed the code, put the new build in place". A full
+# install is only needed once per machine: apt packages, fonts, and the Fcitx5
+# configuration survive a rebuild, so an update touches none of them. It
+# rebuilds incrementally, reinstalls, and restarts Fcitx5.
+
+# The manifest of the last install. The copy under ~/.local/share outlives the
+# build tree, which people delete; the one in BUILD_DIR is the fallback.
+previous_install_manifest() {
+    if [[ -f "$MANIFEST_STORE" ]]; then
+        printf '%s\n' "$MANIFEST_STORE"
+    elif [[ -f "$BUILD_DIR/install_manifest.txt" ]]; then
+        printf '%s\n' "$BUILD_DIR/install_manifest.txt"
+    fi
+}
+
+# The build-tree (or source-tree) file that ends up at the installed path $1,
+# mirroring the install() rules in linux_fcitx5/CMakeLists.txt. Printing nothing
+# means "unknown", which callers must treat as changed — a wrong guess can then
+# only cause an unnecessary reinstall, never a skipped one.
+built_counterpart() {
+    local installed="$1" base parent candidate
+    base="$(basename "$installed")"
+    parent="$(basename "$(dirname "$installed")")"
+
+    # fcitx/hcime-inputmethod.conf is installed as inputmethod/hcime.conf.
+    if [[ "$parent" == "inputmethod" && "$base" == "hcime.conf" ]]; then
+        [[ -f "$ROOT/linux_fcitx5/fcitx/hcime-inputmethod.conf" ]] \
+            && printf '%s\n' "$ROOT/linux_fcitx5/fcitx/hcime-inputmethod.conf"
+        return 0
+    fi
+
+    for candidate in \
+        "$BUILD_DIR/linux_fcitx5/$base" \
+        "$BUILD_DIR/linux_fcitx5/cargo-target/release/$base" \
+        "$ROOT/linux_fcitx5/fcitx/$base"
+    do
+        [[ -f "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+    done
+    return 0
+}
+
+# True when every file from the last install still matches what was just built,
+# i.e. reinstalling would copy nothing new. Lets an update leave a running
+# Fcitx5 alone when the rebuild produced no change.
+#
+# Compared by size and modification time, not by content: `cmake --install`
+# rewrites the RPATH of libhcime.so while copying it (BUILD_RPATH is the cargo
+# target dir, INSTALL_RPATH is $ORIGIN), so the installed library is never
+# byte-identical to the one in the build tree. It does keep the build tree's
+# timestamp, truncated to whole seconds, which is what %Y reports.
+install_is_current() {
+    local manifest="$1" installed built
+    [[ -s "$manifest" ]] || return 1
+    # `|| [[ -n ... ]]` so a manifest without a trailing newline keeps its last
+    # line; cmake writes one that way.
+    while IFS= read -r installed || [[ -n "$installed" ]]; do
+        [[ -n "$installed" ]] || continue
+        [[ -f "$installed" ]] || return 1
+        built="$(built_counterpart "$installed")"
+        [[ -n "$built" ]] || return 1
+        [[ "$(stat -c %s "$built")" == "$(stat -c %s "$installed")" ]] || return 1
+        (( $(stat -c %Y "$installed") >= $(stat -c %Y "$built") )) || return 1
+    done < "$manifest"
+    return 0
+}
+
+update() {
+    local manifest
+    manifest="$(previous_install_manifest)"
+    [[ -n "$manifest" ]] || die "no previous HC_IME installation found (looked for $MANIFEST_STORE).
+An update only refreshes an existing install; set the machine up once with:
+$(copyable "./scripts/install.sh")"
+
+    cat <<EOF
+
+${C_BOLD}HC_IME update${C_RESET}
+
+Rebuilding for: ${C_BOLD}$TARGET_USER${C_RESET} ($TARGET_HOME)
+Last install:   $manifest
+
+This rebuilds the Rust core and the Fcitx5 addon and reinstalls them over the
+existing installation. apt packages, fonts, and your Fcitx5 configuration are
+left exactly as they are.
+EOF
+
+    ensure_rust
+    run_tests
+    build_addon
+
+    if (( ! FORCE )) && install_is_current "$manifest"; then
+        step "Nothing to reinstall"
+        ok "the installed files already match this build"
+        info "Fcitx5 was left running; reinstall anyway with:"
+        copyable "scripts/update.sh --force"
+        return 0
+    fi
+
+    stop_fcitx5
+    install_addon
+    start_fcitx5
+    verify_installation
+
+    if (( DO_CONFIG )) && [[ -f "$PROFILE_PATH" ]] && ! grep -q 'hcime' "$PROFILE_PATH"; then
+        warn "hcime is not in $PROFILE_PATH; run ./scripts/install.sh to wire it back in"
+    fi
+
+    printf '\n%s%sHC_IME updated.%s The new build is installed and Fcitx5 has been restarted.\n' \
+        "$C_BOLD" "$C_GREEN" "$C_RESET"
+}
+
 # ------------------------------------------------------------- uninstall --
 
 uninstall() {
     step "Uninstalling HC_IME"
-    local manifest=""
-    if [[ -f "$MANIFEST_STORE" ]]; then
-        manifest="$MANIFEST_STORE"
-    elif [[ -f "$BUILD_DIR/install_manifest.txt" ]]; then
-        manifest="$BUILD_DIR/install_manifest.txt"
-    else
-        die "no install manifest found at $MANIFEST_STORE or $BUILD_DIR/install_manifest.txt; nothing to uninstall."
-    fi
+    local manifest
+    manifest="$(previous_install_manifest)"
+    [[ -n "$manifest" ]] \
+        || die "no install manifest found at $MANIFEST_STORE or $BUILD_DIR/install_manifest.txt; nothing to uninstall."
     info "using manifest: $manifest"
 
     info "the following files will be removed:"
@@ -835,6 +957,11 @@ main() {
 
     if (( DO_UNINSTALL )); then
         uninstall
+        exit 0
+    fi
+
+    if (( DO_UPDATE )); then
+        update
         exit 0
     fi
 
