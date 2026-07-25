@@ -131,7 +131,7 @@ impl Session {
                 });
             }
         }
-        if exact && self.phrase_candidates.is_empty() {
+        if exact {
             let first = self.phrase_first.as_deref().unwrap_or_default();
             let left = chars.lookup(first);
             let right = chars.lookup(&self.buffer);

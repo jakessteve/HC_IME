@@ -845,8 +845,12 @@ private:
     void configureHanNomOptions(void* session) {
         if (session == nullptr) return;
         const auto& phrasePath = *config_.dictionary->hanNomPhraseDictionaryPath;
-        HC_HanNomOptionsV2 options{static_cast<uint8_t>(*config_.behavior->phrasePrediction),
-                                   static_cast<uint8_t>(*config_.behavior->learnPhraseRanking), nullptr,
+        
+        bool isHanNom = *config_.input->inputMode >= HcImeInputMode::HanNomTelex;
+        uint8_t phrasePrediction = isHanNom ? static_cast<uint8_t>(*config_.behavior->phrasePrediction) : 0;
+        uint8_t phraseLearning = isHanNom ? static_cast<uint8_t>(*config_.behavior->learnPhraseRanking) : 0;
+
+        HC_HanNomOptionsV2 options{phrasePrediction, phraseLearning, nullptr,
                                    phrasePath.empty() ? nullptr : phrasePath.c_str()};
         hc_session_set_hannom_options_v2(session, &options);
     }
