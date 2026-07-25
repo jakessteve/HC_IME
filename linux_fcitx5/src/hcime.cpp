@@ -389,6 +389,23 @@ static bool canReopenLastCommit(InputContext* ic, const ContextState& state, boo
     return cursorTextMatchesLastCommit(ic, state);
 }
 
+// Deletes the character in front of the cursor through the surrounding text.
+// Clients reached over Wayland text-input accept this request but drop the
+// synthetic key events fcitx5 forwards, so a backspace handed back to such a
+// client is simply lost and the text stops shrinking.
+static bool deleteCharacterBeforeCursor(InputContext* ic) {
+    if (!ic->capabilityFlags().test(CapabilityFlag::SurroundingText)) return false;
+    const auto& surrounding = ic->surroundingText();
+    // A selection is the client's to delete, and an unknown or leading cursor
+    // gives nothing to delete from.
+    if (!surrounding.isValid() || surrounding.cursor() != surrounding.anchor() ||
+        surrounding.cursor() == 0) {
+        return false;
+    }
+    ic->deleteSurroundingText(-1, 1);
+    return true;
+}
+
 static void removeLastCommitFromDocument(InputContext* ic, ContextState& state) {
     const auto deleteChars =
         static_cast<unsigned int>(utf8::length(state.lastCommitText)) + state.lastCommitTrailingChars;
@@ -645,7 +662,7 @@ public:
             } else if (tryReconvertLastCommitFromBackspace(event, state, mode, useSurroundingText)) {
                 return;
             } else {
-                resetAndForwardKey(event, state);
+                resetAndDeleteBackwards(event, state);
             }
             return;
         }
@@ -716,6 +733,11 @@ public:
                 clearCommitTracking(state);
                 state.hasActivePreedit = !output.empty();
                 if (output.empty()) {
+                    // In surrounding-text mode the composition is real document
+                    // text, so emptying it has to take that text back out.
+                    if (useSurroundingText) {
+                        commitViaSurroundingText(event.inputContext(), state, "");
+                    }
                     clearPreedit(event.inputContext());
                 } else {
                     if (useSurroundingText && state.hasActivePreedit) {
@@ -896,7 +918,9 @@ private:
                 ic->deleteSurroundingText(-static_cast<int>(surroundingLen), surroundingLen);
             }
         }
-        ic->commitString(committedText);
+        if (!committedText.empty()) {
+            ic->commitString(committedText);
+        }
         state.previousSurroundingText.clear();
     }
 
@@ -1002,6 +1026,22 @@ private:
     void resetAndForwardKey(KeyEvent& event, ContextState& state) {
         clearActivePreedit(event, state);
         event.inputContext()->forwardKey(event.rawKey(), event.isRelease(), event.time());
+        event.filterAndAccept();
+    }
+
+    // A backspace the engine has no composition left to shrink still has to
+    // delete a character. Prefer the surrounding-text request, which every
+    // client that exposes its text honours, and keep the forwarded key for the
+    // clients that expose nothing.
+    void resetAndDeleteBackwards(KeyEvent& event, ContextState& state) {
+        // Erasing a composition that still sits in the document is this key's
+        // deletion; deleting again would eat a second character.
+        const bool erasedPendingText =
+            state.surroundingTextEnabled && !state.previousSurroundingText.empty();
+        clearActivePreedit(event, state);
+        if (!erasedPendingText && !deleteCharacterBeforeCursor(event.inputContext())) {
+            event.inputContext()->forwardKey(event.rawKey(), event.isRelease(), event.time());
+        }
         event.filterAndAccept();
     }
 

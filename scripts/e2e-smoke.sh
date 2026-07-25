@@ -8,6 +8,11 @@ DESTDIR_PATH="${DESTDIR_PATH:-/tmp/hcime-e2e-install}"
 cd "$ROOT"
 
 rustfmt --check hc_core/src/*.rs
+
+# The installer scripts ship to users, so they get the same gate as the code:
+# they must parse, and the status screen must run without changing anything.
+bash -n scripts/*.sh
+bash scripts/install-debian.sh --status >/dev/null
 BUILDER_TMP="$(mktemp -d)"
 rustc scripts/build_nom_dict.rs -O -o "$BUILDER_TMP/build_nom_dict"
 "$BUILDER_TMP/build_nom_dict" --output-dir "$BUILDER_TMP/data" >/dev/null
@@ -39,20 +44,36 @@ HC_CORE_RELEASE="$BUILD_DIR/linux_fcitx5/cargo-target/release"
 rm -rf "$DESTDIR_PATH"
 DESTDIR="$DESTDIR_PATH" cmake --install "$BUILD_DIR"
 
-ADDON="$DESTDIR_PATH/usr/lib/fcitx5/libhcime.so"
-CORE="$DESTDIR_PATH/usr/lib/fcitx5/libhc_core.so"
+# Installed paths come from the manifest cmake just wrote, not from a guess:
+# Fcitx5 lives in /usr/lib/fcitx5 on Arch and /usr/lib/<triplet>/fcitx5 on Debian
+# multiarch, and hardcoding either one makes this gate pass on one distribution
+# while failing on the other.
+MANIFEST="$BUILD_DIR/install_manifest.txt"
+test -s "$MANIFEST"
+manifest_path() {
+    local match
+    match="$(grep -m1 -E "$1\$" "$MANIFEST")"
+    test -n "$match"
+    printf '%s%s\n' "$DESTDIR_PATH" "$match"
+}
+
+ADDON="$(manifest_path 'libhcime\.so')"
+CORE="$(manifest_path 'libhc_core\.so')"
+ADDON_CONF="$(manifest_path 'addon/hcime\.conf')"
+IM_CONF="$(manifest_path 'inputmethod/hcime\.conf')"
+IM_CONF_DIR="$(dirname "$IM_CONF")"
 
 test -f "$ADDON"
 test -f "$CORE"
-test -f "$DESTDIR_PATH/usr/share/fcitx5/addon/hcime.conf"
-test -f "$DESTDIR_PATH/usr/share/fcitx5/inputmethod/hcime.conf"
-test ! -f "$DESTDIR_PATH/usr/share/fcitx5/inputmethod/hcime-telex.conf"
-test ! -f "$DESTDIR_PATH/usr/share/fcitx5/inputmethod/hcime-vni.conf"
-test ! -f "$DESTDIR_PATH/usr/share/fcitx5/inputmethod/hcime-viqr.conf"
-grep -q '^Configurable=True$' "$DESTDIR_PATH/usr/share/fcitx5/addon/hcime.conf"
-grep -q '^Configurable=True$' "$DESTDIR_PATH/usr/share/fcitx5/inputmethod/hcime.conf"
+test -f "$ADDON_CONF"
+test -f "$IM_CONF"
+test ! -f "$IM_CONF_DIR/hcime-telex.conf"
+test ! -f "$IM_CONF_DIR/hcime-vni.conf"
+test ! -f "$IM_CONF_DIR/hcime-viqr.conf"
+grep -q '^Configurable=True$' "$ADDON_CONF"
+grep -q '^Configurable=True$' "$IM_CONF"
 
-LD_LIBRARY_PATH="$DESTDIR_PATH/usr/lib/fcitx5" ldd "$ADDON" | grep -q "$CORE"
+LD_LIBRARY_PATH="$(dirname "$ADDON")" ldd "$ADDON" | grep -q "$CORE"
 readelf -d "$ADDON" | grep -q 'RUNPATH.*\$ORIGIN'
 nm -D "$CORE" | grep -q 'hc_session_handle_key'
 nm -D "$CORE" | grep -q 'hc_session_handle_key_hannom_v2'

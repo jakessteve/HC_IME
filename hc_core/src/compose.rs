@@ -1,6 +1,6 @@
 use crate::transform::{
     apply_breve, apply_circumflex, apply_d_stroke, apply_double_tap, apply_horn, apply_telex_w,
-    apply_tone,
+    apply_tone, complete_ie_syllable, strip_ie_completion,
 };
 use crate::types::{InputMode, Tone};
 use crate::vowel::strip_all_marks;
@@ -28,11 +28,21 @@ impl TypingEngine {
     pub fn render_raw(raw: &str, mode: InputMode, legacy_tone: bool) -> String {
         let mut rendered = String::new();
         for ch in raw.chars() {
-            if !Self::apply_trigger(&mut rendered, mode, ch, legacy_tone) {
-                rendered.push(ch);
-            }
+            Self::apply_key(&mut rendered, mode, ch, legacy_tone);
         }
         rendered
+    }
+
+    // Applies one raw key to the rendered buffer. Every path that grows a
+    // composition goes through here so the incremental render and the full
+    // replay stay identical, including the provisional "yêu"/"iêu" completion
+    // vowel, which only stands while the syllable has no coda.
+    pub fn apply_key(buffer: &mut String, mode: InputMode, ch: char, legacy_tone: bool) {
+        strip_ie_completion(buffer);
+        if !Self::apply_trigger(buffer, mode, ch, legacy_tone) {
+            buffer.push(ch);
+        }
+        complete_ie_syllable(buffer);
     }
 
     pub fn apply_trigger(

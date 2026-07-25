@@ -294,9 +294,11 @@ int main() {
         require(ic.commits.size() == 1 && ic.commits.back() == "xin ", "preedit-less commit carries its space");
 
         require(send(engine, entry, ic, FcitxKey_BackSpace), "preedit-less backspace accepted");
-        require(ic.surroundingDeletes.empty(), "preedit-less client keeps its committed word");
-        require(ic.forwards.size() == 1 && ic.forwards.back() == FcitxKey_BackSpace,
-                "preedit-less backspace is forwarded as an ordinary backspace");
+        require(ic.surroundingDeletes.size() == 1 && ic.surroundingDeletes.back().first == -1 &&
+                    ic.surroundingDeletes.back().second == 1,
+                "preedit-less backspace deletes one character instead of reopening the commit");
+        require(ic.forwards.empty(),
+                "preedit-less backspace does not also forward a key that would delete twice");
     }
 
     {
@@ -321,9 +323,71 @@ int main() {
         ic.updateSurroundingText();
 
         require(send(engine, entry, ic, FcitxKey_BackSpace), "moved-cursor backspace accepted");
-        require(ic.surroundingDeletes.empty(), "moved cursor does not delete unrelated text");
-        require(ic.forwards.size() == 1 && ic.forwards.back() == FcitxKey_BackSpace,
-                "moved-cursor backspace is forwarded as an ordinary backspace");
+        require(ic.surroundingDeletes.size() == 1 && ic.surroundingDeletes.back().second == 1,
+                "moved cursor deletes a single character, never the tracked commit");
+        require(ic.forwards.empty(), "moved-cursor backspace deletes once, not twice");
+    }
+
+    {
+        // Deleting a word the engine still composes must not stop at the space
+        // in front of it: the keys that follow have to keep eating the text the
+        // client already holds, including on clients that ignore forwarded keys.
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        ic.setCapabilityFlags(CapabilityFlags{CapabilityFlag::SurroundingText} | CapabilityFlag::Preedit);
+        ic.surroundingText().setText("", 0, 0);
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        InputContextEvent activateEvent(&ic, EventType::InputContextInputMethodActivated);
+        engine.activate(entry, activateEvent);
+
+        for (auto key : {FcitxKey_l, FcitxKey_a, FcitxKey_f, FcitxKey_space, FcitxKey_q}) {
+            require(send(engine, entry, ic, key), "spaced deletion setup key accepted");
+        }
+        require(ic.commits.size() == 1 && ic.commits.back() == "là ", "spaced deletion commits là with its space");
+        require(ic.inputPanel().clientPreedit().toString() == "q", "spaced deletion composes the next word");
+
+        require(send(engine, entry, ic, FcitxKey_BackSpace), "composition backspace accepted");
+        require(ic.inputPanel().clientPreedit().toString().empty(), "composition backspace empties the preedit");
+
+        ic.forwards.clear();
+        ic.surroundingDeletes.clear();
+        require(send(engine, entry, ic, FcitxKey_BackSpace), "backspace past the space accepted");
+        require(ic.surroundingDeletes.size() == 1 && ic.surroundingDeletes.back().first == -1 &&
+                    ic.surroundingDeletes.back().second == 1,
+                "backspace past the space deletes the space from the document");
+        require(ic.forwards.empty(), "backspace past the space is not also forwarded");
+        require(std::string(ic.surroundingText().text()) == "là", "the space is gone from the client text");
+
+        require(send(engine, entry, ic, FcitxKey_BackSpace), "backspace into the previous word accepted");
+        require(std::string(ic.surroundingText().text()) == "l", "deletion keeps eating the committed word");
+    }
+
+    {
+        // In surrounding-text mode the composition is real document text, so
+        // the backspace that empties it has to remove that text as well.
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        ic.setCapabilityFlags(CapabilityFlags(CapabilityFlag::SurroundingText));
+        ic.surroundingText().setText("", 0, 0);
+        ic.updateSurroundingText();
+
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        InputContextEvent activateEvent(&ic, EventType::InputContextInputMethodActivated);
+        engine.activate(entry, activateEvent);
+        RawConfig config;
+        config.setValueByPath("Output/OutputMode", "SurroundingText");
+        engine.setConfig(config);
+
+        require(send(engine, entry, ic, FcitxKey_q), "surrounding-text composition key accepted");
+        require(std::string(ic.surroundingText().text()) == "q", "surrounding-text mode writes the composition");
+
+        require(send(engine, entry, ic, FcitxKey_BackSpace), "surrounding-text emptying backspace accepted");
+        require(std::string(ic.surroundingText().text()).empty(),
+                "emptying the composition removes it from the document");
     }
 
     {

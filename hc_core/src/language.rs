@@ -112,6 +112,7 @@ fn raw_base_for_vietnamese_shape(raw: &str, mode: InputMode) -> String {
             while raw_has_terminal_telex_trigger(&chars) {
                 chars.pop();
             }
+            chars = collapse_telex_shape_triggers(&chars);
         }
         InputMode::Vni | InputMode::HanNomVni => {
             while chars.last().is_some_and(|last| last.is_ascii_digit()) {
@@ -125,6 +126,25 @@ fn raw_base_for_vietnamese_shape(raw: &str, mode: InputMode) -> String {
         }
     }
     chars.into_iter().collect()
+}
+
+// Telex shape triggers sit inside the word ("teen", "tooi", "ddi"), so the raw
+// keys only spell a Vietnamese syllable once the doubling is folded back into a
+// single letter. Without this, every mid-word ê/ô/â/đ looks like an unspellable
+// syllable and the word is scored as English.
+fn collapse_telex_shape_triggers(chars: &[char]) -> Vec<char> {
+    let mut collapsed: Vec<char> = Vec::with_capacity(chars.len());
+    for &ch in chars {
+        let lower = ch.to_ascii_lowercase();
+        let doubles_previous = collapsed
+            .last()
+            .is_some_and(|previous| previous.to_ascii_lowercase() == lower);
+        if matches!(lower, 'a' | 'e' | 'o' | 'd') && doubles_previous {
+            continue;
+        }
+        collapsed.push(ch);
+    }
+    collapsed
 }
 
 fn is_terminal_vietnamese_trigger(raw: &str, mode: InputMode) -> bool {

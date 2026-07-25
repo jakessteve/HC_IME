@@ -366,6 +366,42 @@ fn telex_tone_placement_on_ye_clusters() {
 }
 
 #[test]
+fn ie_completion_yields_to_a_coda_typed_after_the_tone() {
+    // "yê"/"iê" completes to "yêu"/"iêu" only while the syllable has no coda.
+    // Typing the tone before the final consonant — the usual VNI order, and a
+    // common Telex habit — must not leave that completion vowel behind.
+    let vni = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+    for (raw, rendered) in [
+        ("vie61t", "viết"),
+        ("vie65t", "việt"),
+        ("chie61c", "chiếc"),
+        ("mie62n", "miền"),
+        ("nghie65p", "nghiệp"),
+        ("hie63u", "hiểu"),
+        ("tie6ng1", "tiếng"),
+    ] {
+        hc_session_reset(vni);
+        assert_eq!(type_raw(vni, &mut req, raw), rendered, "VNI {raw}");
+    }
+    hc_session_free(vni);
+
+    let telex = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    for (raw, rendered) in [
+        ("vieest", "viết"),
+        ("vieetj", "việt"),
+        ("chieecs", "chiếc"),
+        ("lieeus", "liếu"),
+        ("hieeur", "hiểu"),
+    ] {
+        hc_session_reset(telex);
+        assert_eq!(type_raw(telex, &mut req, raw), rendered, "Telex {raw}");
+    }
+    hc_session_free(telex);
+}
+
+#[test]
 fn reconversion_preserves_mixed_case() {
     let session = hc_session_new(InputMode::Telex as i32, 0);
     let mut req = key_request(InputMode::Telex);
@@ -556,6 +592,27 @@ fn telex_shape_trigger_commit_prefers_vietnamese_collision() {
     let (committed, status) = commit_with_space(session, &mut req);
     assert_eq!(committed, "mô");
     assert_eq!(status, HCStatusFlag::Commit as i32);
+
+    hc_session_free(session);
+}
+
+#[test]
+fn telex_mid_word_shape_trigger_commits_vietnamese_not_raw_keys() {
+    // The shape trigger sits inside the word, so the raw keys only spell a
+    // Vietnamese syllable after the doubling is folded back ("teen" -> "ten").
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+
+    for (raw, rendered) in [("teen", "tên"), ("tooi", "tôi"), ("meej", "mệ")] {
+        hc_session_reset(session);
+        assert_eq!(type_raw(session, &mut req, raw), rendered);
+        let (committed, status) = commit_with_space(session, &mut req);
+        assert_eq!(
+            committed, rendered,
+            "'{raw}' should commit as '{rendered}', got '{committed}'"
+        );
+        assert_eq!(status, HCStatusFlag::Commit as i32);
+    }
 
     hc_session_free(session);
 }
