@@ -1170,7 +1170,11 @@ private:
         Text preedit(text, flags);
         preedit.setCursor(static_cast<int>(text.size()));
         ic->inputPanel().setClientPreedit(preedit);
-        ic->inputPanel().setPreedit(preedit);
+        if (ic->capabilityFlags().test(CapabilityFlag::Preedit)) {
+            ic->inputPanel().setPreedit(Text());
+        } else {
+            ic->inputPanel().setPreedit(preedit);
+        }
         ic->updatePreedit();
     }
 
