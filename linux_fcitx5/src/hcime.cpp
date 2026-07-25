@@ -995,9 +995,9 @@ private:
             state.hasActivePreedit = !output.empty();
             if (nomResult.candidate_count > 0 && nomResult.candidates != nullptr) {
                 auto candidateList = std::make_unique<CommonCandidateList>();
-                candidateList->setLabels({"1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9."});
-                candidateList->setPageSize(9);
-                candidateList->setLayoutHint(CandidateLayoutHint::Vertical);
+                candidateList->setLabels({"1.", "2.", "3.", "4.", "5."});
+                candidateList->setPageSize(5);
+                candidateList->setLayoutHint(CandidateLayoutHint::Horizontal);
 
                 for (uint16_t i = 0; i < nomResult.candidate_count; ++i) {
                     std::string candStr(reinterpret_cast<const char*>(nomResult.candidates[i].text), nomResult.candidates[i].text_len);
