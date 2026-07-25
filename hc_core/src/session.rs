@@ -311,6 +311,7 @@ impl Session {
         self.macros.clear();
     }
 
+    #[allow(clippy::absurd_extreme_comparisons)]
     pub fn can_edit_last_commit(&self) -> bool {
         if self.last_commit.is_empty() {
             return false;

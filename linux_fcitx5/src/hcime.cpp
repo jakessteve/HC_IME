@@ -997,8 +997,10 @@ private:
 
                 for (uint16_t i = 0; i < nomResult.candidate_count; ++i) {
                     std::string candStr(reinterpret_cast<const char*>(nomResult.candidates[i].text), nomResult.candidates[i].text_len);
-                    Text wordText(candStr, TextFormatFlag::Bold);
-                    candidateList->append<HcNomCandidateWord>(wordText, Text(), i, this);
+                    std::string readingStr(reinterpret_cast<const char*>(nomResult.candidates[i].reading), nomResult.candidates[i].reading_len);
+                    Text wordText(candStr, TextFormatFlag::NoFlag);
+                    Text commentText(readingStr);
+                    candidateList->append<HcNomCandidateWord>(wordText, commentText, i, this);
                 }
                 ic->inputPanel().setCandidateList(std::move(candidateList));
             } else {
@@ -1108,8 +1110,16 @@ private:
         statusArea.addAction(StatusGroup::InputMethod, modeActions_[4].get());
         statusArea.addAction(StatusGroup::InputMethod, modeActions_[5].get());
         statusArea.addAction(StatusGroup::InputMethod, separatorAction_.get());
-        for (const auto& action : toggleActions_) statusArea.addAction(StatusGroup::InputMethod, action.get());
-        statusArea.addAction(StatusGroup::InputMethod, resetLearningAction_.get());
+        statusArea.addAction(StatusGroup::InputMethod, toggleActions_[0].get());
+        statusArea.addAction(StatusGroup::InputMethod, toggleActions_[1].get());
+        statusArea.addAction(StatusGroup::InputMethod, toggleActions_[2].get());
+        statusArea.addAction(StatusGroup::InputMethod, toggleActions_[3].get());
+        
+        if (*config_.input->inputMode >= HcImeInputMode::HanNomTelex) {
+            statusArea.addAction(StatusGroup::InputMethod, toggleActions_[4].get());
+            statusArea.addAction(StatusGroup::InputMethod, toggleActions_[5].get());
+            statusArea.addAction(StatusGroup::InputMethod, resetLearningAction_.get());
+        }
         ic->updateUserInterface(UserInterfaceComponent::StatusArea, true);
     }
 

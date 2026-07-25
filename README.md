@@ -116,7 +116,9 @@ input methods; configure and verify it in the active UI rather than expecting a
 per-HC_IME font setting. The tested ClassicUI Pango font description is
 `Hanom PV,HAN NOM B,HAN NOM A,Noto Sans CJK SC,Jigmo,Jigmo2,Jigmo3 28`; the
 trailing `28` sets the candidate size, and HC_IME leaves the glyph text at the
-fonts' regular weight.
+fonts' regular weight. To avoid square characters (□) for Hán Nôm, ensure your
+system has fonts covering CJK Extension B+, such as **NomNaTong**, **HanaMinA/B**,
+or fonts from the Vietnamese Nôm Preservation Foundation.
 
 To keep Bamboo installed while making HC_IME the default Vietnamese input
 method, set `hcime` as the default in the Fcitx5 profile and leave `bamboo` in

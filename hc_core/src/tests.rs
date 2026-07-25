@@ -1845,7 +1845,10 @@ fn test_tone_then_circumflex_vni() {
     assert_eq!(result1, "tuần", "tuan2 should produce tuần");
 
     let result2 = type_raw(session, &mut req, "6");
-    assert_eq!(result2, "tuàn", "circumflex toggle on tuần should strip â to a");
+    assert_eq!(
+        result2, "tuàn",
+        "circumflex toggle on tuần should strip â to a"
+    );
 
     let result3 = type_raw(session, &mut req, "6");
     assert_eq!(result3, "tuần", "circumflex toggle on tuàn should re-add â");
