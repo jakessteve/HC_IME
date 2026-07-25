@@ -338,7 +338,38 @@ pub fn apply_tone(buffer: &mut String, tone: Tone, legacy_tone: bool) -> bool {
     true
 }
 
-fn apply_vietnamese_normalization(chars: &mut Vec<char>) {
+// A toned "yê"/"iê" cannot end a Vietnamese syllable, so the engine completes it
+// to "yêu"/"iêu" while the syllable has no coda. That vowel is provisional: the
+// user may still be typing "viết", where the "t" is the coda and the completion
+// was never there. It is therefore taken back off before the next key is applied
+// and put back afterwards, instead of being baked into the buffer.
+fn ie_completion_target(chars: &[char]) -> bool {
+    let len = chars.len();
+    if len < 2 {
+        return false;
+    }
+    let toned_circumflex_e = vowel_signature(chars[len - 1])
+        .is_some_and(|(family, _, tone)| family == VowelFamily::CircumflexE && tone != Tone::Flat);
+    toned_circumflex_e
+        && matches!(base_char(chars[len - 2]), 'y' | 'i')
+        && (len < 3 || base_char(chars[len - 3]) != 'u')
+}
+
+pub fn complete_ie_syllable(buffer: &mut String) {
+    let chars: Vec<char> = buffer.chars().collect();
+    if ie_completion_target(&chars) {
+        buffer.push('u');
+    }
+}
+
+pub fn strip_ie_completion(buffer: &mut String) {
+    let chars: Vec<char> = buffer.chars().collect();
+    if matches!(chars.last(), Some('u' | 'U')) && ie_completion_target(&chars[..chars.len() - 1]) {
+        buffer.pop();
+    }
+}
+
+fn apply_vietnamese_normalization(chars: &mut [char]) {
     let bases: String = chars.iter().map(|&ch| base_char(ch)).collect();
 
     if bases.contains("uay") {
@@ -365,26 +396,6 @@ fn apply_vietnamese_normalization(chars: &mut Vec<char>) {
                     chars[idx] = compose_vowel(VowelFamily::CircumflexA, uppercase, tone);
                     break;
                 }
-            }
-        }
-    }
-
-    let len = chars.len();
-    if len >= 2 {
-        let last = chars[len - 1];
-        let second_last = chars[len - 2];
-        let last_is_circumflex_e =
-            vowel_signature(last).is_some_and(|(f, _, _)| matches!(f, VowelFamily::CircumflexE));
-        let second_last_base = base_char(second_last);
-
-        if last_is_circumflex_e && matches!(second_last_base, 'y' | 'i') {
-            let preceding_base = if len >= 3 {
-                base_char(chars[len - 3])
-            } else {
-                ' '
-            };
-            if preceding_base != 'u' {
-                chars.push('u');
             }
         }
     }

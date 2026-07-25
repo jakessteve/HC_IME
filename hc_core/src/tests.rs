@@ -366,6 +366,42 @@ fn telex_tone_placement_on_ye_clusters() {
 }
 
 #[test]
+fn ie_completion_yields_to_a_coda_typed_after_the_tone() {
+    // "yê"/"iê" completes to "yêu"/"iêu" only while the syllable has no coda.
+    // Typing the tone before the final consonant — the usual VNI order, and a
+    // common Telex habit — must not leave that completion vowel behind.
+    let vni = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+    for (raw, rendered) in [
+        ("vie61t", "viết"),
+        ("vie65t", "việt"),
+        ("chie61c", "chiếc"),
+        ("mie62n", "miền"),
+        ("nghie65p", "nghiệp"),
+        ("hie63u", "hiểu"),
+        ("tie6ng1", "tiếng"),
+    ] {
+        hc_session_reset(vni);
+        assert_eq!(type_raw(vni, &mut req, raw), rendered, "VNI {raw}");
+    }
+    hc_session_free(vni);
+
+    let telex = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    for (raw, rendered) in [
+        ("vieest", "viết"),
+        ("vieetj", "việt"),
+        ("chieecs", "chiếc"),
+        ("lieeus", "liếu"),
+        ("hieeur", "hiểu"),
+    ] {
+        hc_session_reset(telex);
+        assert_eq!(type_raw(telex, &mut req, raw), rendered, "Telex {raw}");
+    }
+    hc_session_free(telex);
+}
+
+#[test]
 fn reconversion_preserves_mixed_case() {
     let session = hc_session_new(InputMode::Telex as i32, 0);
     let mut req = key_request(InputMode::Telex);
@@ -556,6 +592,27 @@ fn telex_shape_trigger_commit_prefers_vietnamese_collision() {
     let (committed, status) = commit_with_space(session, &mut req);
     assert_eq!(committed, "mô");
     assert_eq!(status, HCStatusFlag::Commit as i32);
+
+    hc_session_free(session);
+}
+
+#[test]
+fn telex_mid_word_shape_trigger_commits_vietnamese_not_raw_keys() {
+    // The shape trigger sits inside the word, so the raw keys only spell a
+    // Vietnamese syllable after the doubling is folded back ("teen" -> "ten").
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+
+    for (raw, rendered) in [("teen", "tên"), ("tooi", "tôi"), ("meej", "mệ")] {
+        hc_session_reset(session);
+        assert_eq!(type_raw(session, &mut req, raw), rendered);
+        let (committed, status) = commit_with_space(session, &mut req);
+        assert_eq!(
+            committed, rendered,
+            "'{raw}' should commit as '{rendered}', got '{committed}'"
+        );
+        assert_eq!(status, HCStatusFlag::Commit as i32);
+    }
 
     hc_session_free(session);
 }
@@ -2093,12 +2150,17 @@ fn vni_digit_after_space_auto_reopens_commit_within_timeout() {
     assert_eq!(status, HCStatusFlag::Commit as i32);
 
     // Immediately type "6" (circumflex) without backspace
-    // This should auto-reopen the last commit and apply circumflex
+    // This should auto-reopen the last commit and apply circumflex. The status
+    // is ReconversionActive so the host knows to remove the copy of "khong"
+    // it already gave the client.
     req.kind = HCKeyKind::Printable as i32;
     let six = c("6");
     req.text = six.as_ptr();
     let edit = hc_session_handle_key(session, &req);
-    assert_eq!(edit.state.status_flag, HCStatusFlag::InProgress as i32);
+    assert_eq!(
+        edit.state.status_flag,
+        HCStatusFlag::ReconversionActive as i32
+    );
     assert_eq!(read_and_free(edit.state), "không");
 
     hc_session_free(session);
@@ -2124,6 +2186,30 @@ fn vni_digit_after_space_does_not_reopen_after_timeout() {
     req.text = six.as_ptr();
     let edit = hc_session_handle_key(session, &req);
     assert_eq!(edit.handled, 0, "digit after timeout should not be handled");
+    free_state(edit.state);
+
+    hc_session_free(session);
+}
+
+#[test]
+fn vni_digit_does_not_reopen_word_it_cannot_transform() {
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+
+    // "bcd" has no vowel, so no tone digit can transform it. Reopening it would
+    // re-commit the word a second time next to the copy the client already has.
+    assert_eq!(type_raw(session, &mut req, "bcd"), "bcd");
+    let (committed, _status) = commit_with_space(session, &mut req);
+    assert_eq!(committed, "bcd");
+
+    req.kind = HCKeyKind::Printable as i32;
+    let one = c("1");
+    req.text = one.as_ptr();
+    let edit = hc_session_handle_key(session, &req);
+    assert_eq!(
+        edit.handled, 0,
+        "digit that cannot transform the last commit stays literal"
+    );
     free_state(edit.state);
 
     hc_session_free(session);
@@ -2170,7 +2256,10 @@ fn vni_tone_digit_reopens_untone_word() {
     let one = c("1");
     req.text = one.as_ptr();
     let edit = hc_session_handle_key(session, &req);
-    assert_eq!(edit.state.status_flag, HCStatusFlag::InProgress as i32);
+    assert_eq!(
+        edit.state.status_flag,
+        HCStatusFlag::ReconversionActive as i32
+    );
     assert_eq!(read_and_free(edit.state), "khóng");
 
     hc_session_free(session);

@@ -47,25 +47,28 @@ public:
     int preeditUpdates = 0;
 
 protected:
+    // Surrounding-text offsets are counted in characters, the way real clients
+    // report them, so multi-byte composition results stay in sync.
     void commitStringImpl(const std::string& text) override {
         commits.push_back(text);
         if (surroundingText().isValid()) {
-            auto cur = surroundingText().text();
-            auto newPos = static_cast<unsigned int>(cur.size() + text.size());
-            surroundingText().setText(std::string(cur) + text, newPos, newPos);
+            auto next = std::string(surroundingText().text()) + text;
+            auto pos = static_cast<unsigned int>(utf8::length(next));
+            surroundingText().setText(next, pos, pos);
         }
     }
 
     void deleteSurroundingTextImpl(int offset, unsigned int size) override {
         surroundingDeletes.emplace_back(offset, size);
         if (surroundingText().isValid()) {
-            auto cur = surroundingText().text();
-            auto curLen = static_cast<int>(cur.size());
+            auto cur = std::string(surroundingText().text());
+            auto curLen = static_cast<int>(utf8::length(cur));
             int start = curLen + offset;
             if (start < 0) start = 0;
             auto end = start + static_cast<int>(size);
             if (end > curLen) end = curLen;
-            auto next = std::string(cur.substr(0, start)) + std::string(cur.substr(end));
+            auto next = cur.substr(0, utf8::ncharByteLength(cur.begin(), start)) +
+                        cur.substr(utf8::ncharByteLength(cur.begin(), end));
             auto pos = static_cast<unsigned int>(start);
             surroundingText().setText(next, pos, pos);
         }
@@ -242,7 +245,7 @@ int main() {
     {
         InputContextManager manager;
         MockInputContext ic(manager);
-        ic.setCapabilityFlags(CapabilityFlags(CapabilityFlag::SurroundingText));
+        ic.setCapabilityFlags(CapabilityFlags{CapabilityFlag::SurroundingText} | CapabilityFlag::Preedit);
         ic.surroundingText().setText(" ", 1, 1);
         hcime::HcImeEngine engine(nullptr);
         const auto entries = engine.listInputMethods();
@@ -257,11 +260,11 @@ int main() {
         require(send(engine, entry, ic, FcitxKey_1), "VNI spaced edit acute accepted");
         require(ic.inputPanel().clientPreedit().toString() == "cá", "VNI spaced edit composes cá");
         require(send(engine, entry, ic, FcitxKey_space), "VNI spaced edit commits with space");
-        require(ic.commits.size() == 1 && ic.commits.back() == "cá", "VNI spaced edit commits cá");
-        require(ic.forwards.size() == 1 && ic.forwards.back() == FcitxKey_space, "VNI spaced edit forwards space");
+        require(ic.commits.size() == 1 && ic.commits.back() == "cá ", "VNI spaced edit commits cá with its space");
+        require(ic.forwards.empty(), "VNI spaced edit does not forward the space separately");
 
         require(send(engine, entry, ic, FcitxKey_BackSpace), "VNI spaced edit reopens committed word");
-        require(ic.forwards.size() == 1, "VNI spaced edit consumes reopening backspace");
+        require(ic.forwards.empty(), "VNI spaced edit consumes reopening backspace");
         require(ic.surroundingDeletes.size() == 1, "VNI spaced edit deletes committed word and trailing space");
         require(ic.surroundingDeletes.back().first == -3 && ic.surroundingDeletes.back().second == 3,
                 "VNI spaced edit deletes cá plus the trailing space");
@@ -269,6 +272,172 @@ int main() {
 
         require(send(engine, entry, ic, FcitxKey_2), "VNI spaced edit grave accepted");
         require(ic.inputPanel().clientPreedit().toString() == "cà", "VNI spaced edit changes cá to cà");
+    }
+
+    {
+        // A client that cannot show a preedit must never have its committed
+        // word taken back: the word would vanish with nothing to replace it.
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        ic.setCapabilityFlags(CapabilityFlags(CapabilityFlag::SurroundingText));
+        ic.surroundingText().setText("", 0, 0);
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        InputContextEvent activateEvent(&ic, EventType::InputContextInputMethodActivated);
+        engine.activate(entry, activateEvent);
+
+        require(send(engine, entry, ic, FcitxKey_x), "preedit-less x accepted");
+        require(send(engine, entry, ic, FcitxKey_i), "preedit-less i accepted");
+        require(send(engine, entry, ic, FcitxKey_n), "preedit-less n accepted");
+        require(send(engine, entry, ic, FcitxKey_space), "preedit-less space commits");
+        require(ic.commits.size() == 1 && ic.commits.back() == "xin ", "preedit-less commit carries its space");
+
+        require(send(engine, entry, ic, FcitxKey_BackSpace), "preedit-less backspace accepted");
+        require(ic.surroundingDeletes.size() == 1 && ic.surroundingDeletes.back().first == -1 &&
+                    ic.surroundingDeletes.back().second == 1,
+                "preedit-less backspace deletes one character instead of reopening the commit");
+        require(ic.forwards.empty(),
+                "preedit-less backspace does not also forward a key that would delete twice");
+    }
+
+    {
+        // The text before the cursor is no longer the committed word, so the
+        // engine must not delete whatever happens to sit there now.
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        ic.setCapabilityFlags(CapabilityFlags{CapabilityFlag::SurroundingText} | CapabilityFlag::Preedit);
+        ic.surroundingText().setText("", 0, 0);
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        InputContextEvent activateEvent(&ic, EventType::InputContextInputMethodActivated);
+        engine.activate(entry, activateEvent);
+
+        require(send(engine, entry, ic, FcitxKey_x), "moved-cursor x accepted");
+        require(send(engine, entry, ic, FcitxKey_i), "moved-cursor i accepted");
+        require(send(engine, entry, ic, FcitxKey_n), "moved-cursor n accepted");
+        require(send(engine, entry, ic, FcitxKey_space), "moved-cursor space commits");
+
+        ic.surroundingText().setText("some other text", 15, 15);
+        ic.updateSurroundingText();
+
+        require(send(engine, entry, ic, FcitxKey_BackSpace), "moved-cursor backspace accepted");
+        require(ic.surroundingDeletes.size() == 1 && ic.surroundingDeletes.back().second == 1,
+                "moved cursor deletes a single character, never the tracked commit");
+        require(ic.forwards.empty(), "moved-cursor backspace deletes once, not twice");
+    }
+
+    {
+        // Deleting a word the engine still composes must not stop at the space
+        // in front of it: the keys that follow have to keep eating the text the
+        // client already holds, including on clients that ignore forwarded keys.
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        ic.setCapabilityFlags(CapabilityFlags{CapabilityFlag::SurroundingText} | CapabilityFlag::Preedit);
+        ic.surroundingText().setText("", 0, 0);
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        InputContextEvent activateEvent(&ic, EventType::InputContextInputMethodActivated);
+        engine.activate(entry, activateEvent);
+
+        for (auto key : {FcitxKey_l, FcitxKey_a, FcitxKey_f, FcitxKey_space, FcitxKey_q}) {
+            require(send(engine, entry, ic, key), "spaced deletion setup key accepted");
+        }
+        require(ic.commits.size() == 1 && ic.commits.back() == "là ", "spaced deletion commits là with its space");
+        require(ic.inputPanel().clientPreedit().toString() == "q", "spaced deletion composes the next word");
+
+        require(send(engine, entry, ic, FcitxKey_BackSpace), "composition backspace accepted");
+        require(ic.inputPanel().clientPreedit().toString().empty(), "composition backspace empties the preedit");
+
+        ic.forwards.clear();
+        ic.surroundingDeletes.clear();
+        require(send(engine, entry, ic, FcitxKey_BackSpace), "backspace past the space accepted");
+        require(ic.surroundingDeletes.size() == 1 && ic.surroundingDeletes.back().first == -1 &&
+                    ic.surroundingDeletes.back().second == 1,
+                "backspace past the space deletes the space from the document");
+        require(ic.forwards.empty(), "backspace past the space is not also forwarded");
+        require(std::string(ic.surroundingText().text()) == "là", "the space is gone from the client text");
+
+        require(send(engine, entry, ic, FcitxKey_BackSpace), "backspace into the previous word accepted");
+        require(std::string(ic.surroundingText().text()) == "l", "deletion keeps eating the committed word");
+    }
+
+    {
+        // In surrounding-text mode the composition is real document text, so
+        // the backspace that empties it has to remove that text as well.
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        ic.setCapabilityFlags(CapabilityFlags(CapabilityFlag::SurroundingText));
+        ic.surroundingText().setText("", 0, 0);
+        ic.updateSurroundingText();
+
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        InputContextEvent activateEvent(&ic, EventType::InputContextInputMethodActivated);
+        engine.activate(entry, activateEvent);
+        RawConfig config;
+        config.setValueByPath("Output/OutputMode", "SurroundingText");
+        engine.setConfig(config);
+
+        require(send(engine, entry, ic, FcitxKey_q), "surrounding-text composition key accepted");
+        require(std::string(ic.surroundingText().text()) == "q", "surrounding-text mode writes the composition");
+
+        require(send(engine, entry, ic, FcitxKey_BackSpace), "surrounding-text emptying backspace accepted");
+        require(std::string(ic.surroundingText().text()).empty(),
+                "emptying the composition removes it from the document");
+    }
+
+    {
+        // A VNI digit that reopens the previous commit must replace the copy the
+        // client already has instead of composing a duplicate next to it.
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        ic.setCapabilityFlags(CapabilityFlags{CapabilityFlag::SurroundingText} | CapabilityFlag::Preedit);
+        ic.surroundingText().setText("", 0, 0);
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        InputContextEvent activateEvent(&ic, EventType::InputContextInputMethodActivated);
+        engine.activate(entry, activateEvent);
+        RawConfig config;
+        config.setValueByPath("Input/InputMethod", "VNI");
+        engine.setConfig(config);
+
+        require(send(engine, entry, ic, FcitxKey_c), "VNI digit reopen c accepted");
+        require(send(engine, entry, ic, FcitxKey_a), "VNI digit reopen a accepted");
+        require(send(engine, entry, ic, FcitxKey_space), "VNI digit reopen space commits");
+        require(ic.commits.size() == 1 && ic.commits.back() == "ca ", "VNI digit reopen commits ca with its space");
+
+        require(send(engine, entry, ic, FcitxKey_1), "VNI digit reopen acute accepted");
+        require(ic.surroundingDeletes.size() == 1, "VNI digit reopen removes the committed copy");
+        require(ic.surroundingDeletes.back().first == -3 && ic.surroundingDeletes.back().second == 3,
+                "VNI digit reopen removes ca plus the trailing space");
+        require(ic.inputPanel().clientPreedit().toString() == "cá", "VNI digit reopen composes cá");
+    }
+
+    {
+        // Same digit, but the client cannot give the word back: the digit stays
+        // literal rather than duplicating the committed word.
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        InputContextEvent activateEvent(&ic, EventType::InputContextInputMethodActivated);
+        engine.activate(entry, activateEvent);
+        RawConfig config;
+        config.setValueByPath("Input/InputMethod", "VNI");
+        engine.setConfig(config);
+
+        require(send(engine, entry, ic, FcitxKey_c), "VNI literal digit c accepted");
+        require(send(engine, entry, ic, FcitxKey_a), "VNI literal digit a accepted");
+        require(send(engine, entry, ic, FcitxKey_space), "VNI literal digit space commits");
+        require(!send(engine, entry, ic, FcitxKey_1), "VNI digit passes through when the commit cannot be reopened");
+        require(ic.surroundingDeletes.empty(), "VNI literal digit deletes nothing");
+        require(ic.inputPanel().clientPreedit().toString().empty(), "VNI literal digit leaves no preedit");
     }
 
     {

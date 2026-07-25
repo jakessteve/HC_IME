@@ -139,14 +139,12 @@ impl Session {
         let raw_len = self.raw_buffer.len();
         if raw_len == self.rendered_raw_len + 1 {
             let last_char = self.raw_buffer.chars().last().unwrap();
-            if !crate::compose::TypingEngine::apply_trigger(
+            crate::compose::TypingEngine::apply_key(
                 &mut self.buffer,
                 self.mode,
                 last_char,
                 self.legacy_tone,
-            ) {
-                self.buffer.push(last_char);
-            }
+            );
         } else {
             self.buffer = crate::compose::TypingEngine::render_raw(
                 &self.raw_buffer,

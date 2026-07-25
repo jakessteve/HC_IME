@@ -651,20 +651,18 @@ impl Session {
                     let single_char = chars.next().is_none();
 
                     // Auto-reopen last commit for VNI digit transformation within edit window.
-                    // For tone digits (1-5), only reopen when the committed word has no tone,
-                    // so that standalone numbers after a toned word pass through as literals.
-                    // For diacritic digits (6-9) and 0, use the normal transform check.
-                    let auto_reopen_allowed = self.can_edit_last_commit() && {
-                        if ('1'..='5').contains(&first_char) {
-                            strip_all_marks(&self.last_commit) == self.last_commit
-                        } else {
-                            vni_digit_transforms_buffer(
-                                &self.last_commit,
-                                first_char,
-                                self.legacy_tone,
-                            )
-                        }
-                    };
+                    // The digit must actually transform the committed word: reopening it only
+                    // to append the digit as a literal would re-commit the word a second time.
+                    // For tone digits (1-5), additionally require that the committed word has
+                    // no tone, so standalone numbers after a toned word stay literal.
+                    let auto_reopen_allowed = self.can_edit_last_commit()
+                        && vni_digit_transforms_buffer(
+                            &self.last_commit,
+                            first_char,
+                            self.legacy_tone,
+                        )
+                        && (!('1'..='5').contains(&first_char)
+                            || strip_all_marks(&self.last_commit) == self.last_commit);
                     if self.mode == InputMode::Vni
                         && single_char
                         && first_char.is_ascii_digit()
@@ -678,6 +676,10 @@ impl Session {
                         } else {
                             self.last_raw.clone()
                         };
+                        // The host already gave the committed word to the client;
+                        // report reconversion so it removes that copy instead of
+                        // rendering the reopened word a second time.
+                        self.reconversion_active = true;
                     }
 
                     self.last_commit.clear();
