@@ -796,16 +796,6 @@ private:
     }
 
     void applySurroundingTextPreedit(InputContext* ic, ContextState& state, const std::string& newPreedit) {
-        if (!state.previousSurroundingText.empty()) {
-            auto currentSurrounding = ic->surroundingText().text();
-            if (!currentSurrounding.empty()) {
-                auto len = state.previousSurroundingText.size();
-                if (currentSurrounding.size() < len ||
-                    currentSurrounding.compare(currentSurrounding.size() - len, len, state.previousSurroundingText) != 0) {
-                    state.previousSurroundingText.clear();
-                }
-            }
-        }
         if (state.previousSurroundingText.empty()) {
             ic->commitString(newPreedit);
         } else {

@@ -306,7 +306,6 @@ pub fn apply_d_stroke(buffer: &mut String) -> bool {
 
 pub fn apply_tone(buffer: &mut String, tone: Tone, legacy_tone: bool) -> bool {
     let mut chars: Vec<char> = buffer.chars().collect();
-
     apply_vietnamese_normalization(&mut chars);
 
     let has_tone = chars
@@ -336,6 +335,107 @@ pub fn apply_tone(buffer: &mut String, tone: Tone, legacy_tone: bool) -> bool {
     chars[target] = next;
     *buffer = chars.into_iter().collect();
     true
+}
+
+pub fn apply_tone_vni_toggle(buffer: &mut String, tone: Tone, legacy_tone: bool) -> bool {
+    let mut chars: Vec<char> = buffer.chars().collect();
+    apply_vietnamese_normalization(&mut chars);
+
+    // Toggle: if this exact tone is already on any vowel, strip it
+    for idx in (0..chars.len()).rev() {
+        if let Some((_, _, existing_tone)) = vowel_signature(chars[idx]) {
+            if existing_tone == tone {
+                let stripped = strip_tone_char(chars[idx]);
+                if stripped != chars[idx] {
+                    chars[idx] = stripped;
+                    *buffer = chars.into_iter().collect();
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Not already present → apply normally
+    apply_tone(buffer, tone, legacy_tone)
+}
+
+pub fn apply_circumflex_vni_toggle(buffer: &mut String) -> bool {
+    let mut chars: Vec<char> = buffer.chars().collect();
+    for idx in (0..chars.len()).rev() {
+        if let Some((family, uppercase, tone)) = vowel_signature(chars[idx]) {
+            let plain = match family {
+                VowelFamily::CircumflexA => Some(VowelFamily::PlainA),
+                VowelFamily::CircumflexE => Some(VowelFamily::PlainE),
+                VowelFamily::CircumflexO => Some(VowelFamily::PlainO),
+                _ => None,
+            };
+            if let Some(plain_family) = plain {
+                chars[idx] = compose_vowel(plain_family, uppercase, tone);
+                *buffer = chars.into_iter().collect();
+                return true;
+            }
+        }
+    }
+    apply_circumflex(buffer)
+}
+
+pub fn apply_horn_vni_toggle(buffer: &mut String) -> bool {
+    let mut chars: Vec<char> = buffer.chars().collect();
+    let mut stripped = false;
+    for idx in (0..chars.len()).rev() {
+        if let Some((family, uppercase, tone)) = vowel_signature(chars[idx]) {
+            match family {
+                VowelFamily::HornU => {
+                    chars[idx] = compose_vowel(VowelFamily::PlainU, uppercase, tone);
+                    stripped = true;
+                }
+                VowelFamily::HornO => {
+                    chars[idx] = compose_vowel(VowelFamily::PlainO, uppercase, tone);
+                    stripped = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    if stripped {
+        *buffer = chars.into_iter().collect();
+        return true;
+    }
+    apply_horn(buffer)
+}
+
+pub fn apply_breve_vni_toggle(buffer: &mut String) -> bool {
+    let mut chars: Vec<char> = buffer.chars().collect();
+    for idx in (0..chars.len()).rev() {
+        if let Some((family, uppercase, tone)) = vowel_signature(chars[idx]) {
+            if family == VowelFamily::BreveA {
+                chars[idx] = compose_vowel(VowelFamily::PlainA, uppercase, tone);
+                *buffer = chars.into_iter().collect();
+                return true;
+            }
+        }
+    }
+    apply_breve(buffer)
+}
+
+pub fn apply_d_stroke_vni_toggle(buffer: &mut String) -> bool {
+    let mut chars: Vec<char> = buffer.chars().collect();
+    for idx in (0..chars.len()).rev() {
+        match chars[idx] {
+            'đ' => {
+                chars[idx] = 'd';
+                *buffer = chars.into_iter().collect();
+                return true;
+            }
+            'Đ' => {
+                chars[idx] = 'D';
+                *buffer = chars.into_iter().collect();
+                return true;
+            }
+            _ => {}
+        }
+    }
+    apply_d_stroke(buffer)
 }
 
 fn apply_vietnamese_normalization(chars: &mut Vec<char>) {

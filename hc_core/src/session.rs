@@ -20,7 +20,7 @@ pub struct NomTextCandidate {
 }
 use crate::vowel::strip_all_marks;
 
-pub const EDIT_TIMEOUT_MS: u128 = 1500;
+pub const EDIT_TIMEOUT_MS: u128 = 0;
 
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -119,7 +119,7 @@ impl Session {
         self.last_commit_time = None;
         self.previous_buffer.clear();
         self.previous_raw_buffer.clear();
-        self.rendered_raw_len = self.previous_rendered_raw_len;
+        self.previous_rendered_raw_len = self.rendered_raw_len;
         self.rendered_raw_len = 0;
         self.previous_rendered_raw_len = 0;
         self.quick_consonant_lock = 0;
@@ -268,6 +268,7 @@ impl Session {
                 self.raw_buffer.clear();
                 self.last_commit_time = Some(Instant::now());
                 self.quick_consonant_lock = 0;
+                self.rendered_raw_len = 0;
                 return crate::hc_state_from_string(
                     &expansion,
                     HCStatusFlag::Commit,
@@ -293,6 +294,7 @@ impl Session {
         self.raw_buffer.clear();
         self.last_commit_time = Some(Instant::now());
         self.quick_consonant_lock = 0;
+        self.rendered_raw_len = 0;
 
         crate::hc_state_from_string(
             &decision.text,

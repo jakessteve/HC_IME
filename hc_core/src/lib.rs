@@ -656,7 +656,10 @@ impl Session {
                     // For diacritic digits (6-9) and 0, use the normal transform check.
                     let auto_reopen_allowed = self.can_edit_last_commit() && {
                         if ('1'..='5').contains(&first_char) {
-                            strip_all_marks(&self.last_commit) == self.last_commit
+                            !self.last_commit.chars().any(|ch| {
+                                crate::vowel::vowel_signature(ch)
+                                    .is_some_and(|(_, _, t)| t != crate::types::Tone::Flat)
+                            })
                         } else {
                             vni_digit_transforms_buffer(
                                 &self.last_commit,

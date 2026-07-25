@@ -1,6 +1,7 @@
 use crate::transform::{
-    apply_breve, apply_circumflex, apply_d_stroke, apply_double_tap, apply_horn, apply_telex_w,
-    apply_tone,
+    apply_breve, apply_breve_vni_toggle, apply_circumflex, apply_circumflex_vni_toggle,
+    apply_d_stroke_vni_toggle, apply_double_tap, apply_horn, apply_horn_vni_toggle,
+    apply_telex_w, apply_tone, apply_tone_vni_toggle,
 };
 use crate::types::{InputMode, Tone};
 use crate::vowel::strip_all_marks;
@@ -90,15 +91,15 @@ impl TypingEngine {
                     true
                 }
             }
-            '1' => apply_tone(buffer, Tone::Sac, legacy_tone),
-            '2' => apply_tone(buffer, Tone::Huyen, legacy_tone),
-            '3' => apply_tone(buffer, Tone::Hoi, legacy_tone),
-            '4' => apply_tone(buffer, Tone::Nga, legacy_tone),
-            '5' => apply_tone(buffer, Tone::Nang, legacy_tone),
-            '6' => apply_circumflex(buffer),
-            '7' => apply_horn(buffer),
-            '8' => apply_breve(buffer),
-            '9' => apply_d_stroke(buffer),
+            '1' => apply_tone_vni_toggle(buffer, Tone::Sac, legacy_tone),
+            '2' => apply_tone_vni_toggle(buffer, Tone::Huyen, legacy_tone),
+            '3' => apply_tone_vni_toggle(buffer, Tone::Hoi, legacy_tone),
+            '4' => apply_tone_vni_toggle(buffer, Tone::Nga, legacy_tone),
+            '5' => apply_tone_vni_toggle(buffer, Tone::Nang, legacy_tone),
+            '6' => apply_circumflex_vni_toggle(buffer),
+            '7' => apply_horn_vni_toggle(buffer),
+            '8' => apply_breve_vni_toggle(buffer),
+            '9' => apply_d_stroke_vni_toggle(buffer),
             _ => false,
         }
     }
