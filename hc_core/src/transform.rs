@@ -308,25 +308,34 @@ pub fn apply_tone(buffer: &mut String, tone: Tone, legacy_tone: bool) -> bool {
     let mut chars: Vec<char> = buffer.chars().collect();
     apply_vietnamese_normalization(&mut chars);
 
-    let has_tone = chars
-        .iter()
-        .any(|&ch| vowel_signature(ch).is_some_and(|(_, _, t)| t != Tone::Flat));
-
-    let ends_with_coda = chars.len() >= 2 && {
-        let last = chars[chars.len() - 1];
-        let second_last = chars[chars.len() - 2];
-        !is_vowel(last) && !is_vowel(second_last)
-    };
-
-    if has_tone && ends_with_coda {
-        *buffer = chars.into_iter().collect();
-        return true;
-    }
-
     let target = match tone_target_index(&chars, legacy_tone) {
         Some(idx) => idx,
         None => return false,
     };
+
+    // Existing tone anywhere in the syllable → this keystroke is re-toning.
+    let existing_tone = chars
+        .iter()
+        .find_map(|&ch| vowel_signature(ch).and_then(|(_, _, t)| (t != Tone::Flat).then_some(t)));
+
+    if let Some(existing) = existing_tone {
+        // Strip the current tone first so re-toning replaces rather than stacks
+        // (works for closed syllables too, e.g. "váng" + f → "vàng").
+        for ch in chars.iter_mut() {
+            *ch = strip_tone_char(*ch);
+        }
+        if existing == tone {
+            // Same tone key pressed again → cancel it and return false so the
+            // key is emitted literally (standard Telex/VIQR: "coss" → "cos",
+            // "ass" → "as", "toanss" → "toans").
+            *buffer = chars.into_iter().collect();
+            return false;
+        }
+        chars[target] = apply_tone_to_char(chars[target], tone);
+        *buffer = chars.into_iter().collect();
+        return true;
+    }
+
     let base = chars[target];
     let next = apply_tone_to_char(base, tone);
     if next == base {
@@ -461,7 +470,11 @@ fn apply_vietnamese_normalization(chars: &mut Vec<char>) {
             if idx > 0 && idx < chars.len() - 1 {
                 let prev_base = base_char(chars[idx - 1]);
                 let next_ch = chars[idx + 1];
-                if prev_base == 'u' && !is_vowel(next_ch) {
+                // Exclude the "qu" glide: in "qua<coda>" the u belongs to the
+                // qu- initial, so the a stays plain (quán, quạt, quát) instead of
+                // becoming â. Mirrors the qu exclusion in tone_target_index.
+                let qu_glide = idx >= 2 && matches!(chars[idx - 2], 'q' | 'Q');
+                if prev_base == 'u' && !is_vowel(next_ch) && !qu_glide {
                     chars[idx] = compose_vowel(VowelFamily::CircumflexA, uppercase, tone);
                     break;
                 }

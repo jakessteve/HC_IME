@@ -839,6 +839,104 @@ fn tone_after_qu_glide_handles_mixed_case() {
 }
 
 #[test]
+fn qu_glide_keeps_plain_a_with_coda_p0_1() {
+    // P0-1: "qua<coda>" + tone must stay plain a (quán/quạt/quát), not become
+    // â (quấn/quật/quất). The bug lived in apply_vietnamese_normalization, which
+    // rewrote a→â after u without excluding the qu- glide.
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    assert_eq!(type_raw(session, &mut req, "quats"), "quát"); // to shout
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "quatj"), "quạt"); // electric fan
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "quans"), "quán"); // shop
+    hc_session_reset(session);
+    // Controls: non-qu "uan" still becomes "uân" (tuần), and explicit "quaan"
+    // (aa → â) still yields the quân family (quấn). The fix must not touch these.
+    assert_eq!(type_raw(session, &mut req, "tuanf"), "tuần");
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "quaans"), "quấn");
+    hc_session_free(session);
+
+    // The same normalization is shared by VNI and VIQR.
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+    assert_eq!(type_raw(session, &mut req, "quan1"), "quán");
+    hc_session_free(session);
+
+    let session = hc_session_new(InputMode::Viqr as i32, 0);
+    let mut req = key_request(InputMode::Viqr);
+    assert_eq!(type_raw(session, &mut req, "quan'"), "quán");
+    hc_session_free(session);
+}
+
+#[test]
+fn repeated_tone_key_cancels_tone_p2_8() {
+    // P2-8: pressing a tone key twice removes the tone and emits the letter
+    // literally (standard Telex). Previously produced "cós"/"ás"/"toáns".
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    assert_eq!(type_raw(session, &mut req, "coss"), "cos");
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "ass"), "as");
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "toanss"), "toans");
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "vangss"), "vangs"); // closed syllable
+    hc_session_reset(session);
+    // Controls: a single tone still applies; a different tone still replaces.
+    assert_eq!(type_raw(session, &mut req, "cos"), "có");
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "cosf"), "cò");
+    hc_session_free(session);
+}
+
+#[test]
+fn retone_closed_syllable_replaces_p1_3() {
+    // P1-3: re-toning a syllable that ends in a 2-consonant coda must replace
+    // the tone, not swallow the key. Previously the second tone key was eaten.
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    assert_eq!(type_raw(session, &mut req, "vangsf"), "vàng"); // váng -> vàng
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "manhsf"), "mành"); // mánh -> mành
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "toongsf"), "tồng"); // tống -> tồng
+    hc_session_free(session);
+}
+
+#[test]
+fn tone_reedit_hardening_across_modes() {
+    // QC hardening: uppercase re-tone, cancel on a non-first vowel, and
+    // re-tone / cancel across VNI and VIQR — all exercise the strip-then-apply
+    // path added for P1-3 / P2-8.
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    assert_eq!(type_raw(session, &mut req, "VANGSF"), "VÀNG"); // uppercase retone
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "cuoongsf"), "cuồng"); // ô keeps its circumflex
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "tieengss"), "tiêngs"); // cancel on ê (2nd vowel)
+    hc_session_free(session);
+
+    // VNI: a different digit replaces the tone; the same digit twice cancels it.
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+    assert_eq!(type_raw(session, &mut req, "quan12"), "quàn"); // sắc -> huyền
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "vang11"), "vang"); // cancel (digit consumed)
+    hc_session_free(session);
+
+    // VIQR: a different mark replaces; the same mark twice cancels + emits literal.
+    let session = hc_session_new(InputMode::Viqr as i32, 0);
+    let mut req = key_request(InputMode::Viqr);
+    assert_eq!(type_raw(session, &mut req, "vang'?"), "vảng"); // sắc -> hỏi
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "vang''"), "vang'"); // cancel + literal mark
+    hc_session_free(session);
+}
+
+#[test]
 fn triphthong_oay_places_tone_on_a() {
     let session = hc_session_new(InputMode::Telex as i32, 0);
     let mut req = key_request(InputMode::Telex);
@@ -1544,8 +1642,11 @@ fn tone_edge_case_uoi_circumflex() {
 fn tone_edge_case_uoi_with_coda() {
     let session = hc_session_new(InputMode::Telex as i32, 0);
     let mut req = key_request(InputMode::Telex);
+    // s then f on a closed syllable: the later tone (huyền) must replace the
+    // earlier (sắc) on ô. Previously asserted "tống" — that locked in the P1-3
+    // bug where the second tone key was swallowed on 2-consonant codas.
     let result = type_raw(session, &mut req, "toongsf");
-    assert_eq!(result, "tống", "tống: huyen tone should go on ô with coda");
+    assert_eq!(result, "tồng", "tồng: huyền replaces sắc on ô with a coda");
     hc_session_free(session);
 }
 
