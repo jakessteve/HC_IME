@@ -151,14 +151,15 @@ fn telex_tone_placement_on_ye_clusters() {
     let session = hc_session_new(InputMode::Telex as i32, 0);
     let mut req = key_request(InputMode::Telex);
 
-    // "yê" auto-completes to "yêu" in Vietnamese orthography
-    assert_eq!(type_raw(session, &mut req, "yees"), "yếu");
+    // "iê/yê" is NOT auto-completed to "iêu/yêu" — the u must be typed. The tone
+    // still lands on ê. (Auto-u corrupted việt/viên/yên-class words: P2-5.)
+    assert_eq!(type_raw(session, &mut req, "yees"), "yế");
     hc_session_reset(session);
 
-    assert_eq!(type_raw(session, &mut req, "yeef"), "yều");
+    assert_eq!(type_raw(session, &mut req, "yeef"), "yề");
     hc_session_reset(session);
 
-    assert_eq!(type_raw(session, &mut req, "nyeer"), "nyểu");
+    assert_eq!(type_raw(session, &mut req, "nyeer"), "nyể");
     hc_session_reset(session);
 
     assert_eq!(type_raw(session, &mut req, "mex"), "mẽ");
@@ -1409,7 +1410,7 @@ fn tone_edge_case_yeu_circumflex() {
     let session = hc_session_new(InputMode::Telex as i32, 0);
     let mut req = key_request(InputMode::Telex);
     let result = type_raw(session, &mut req, "yeef");
-    assert_eq!(result, "yều", "yều: tone should go on ê (circumflex e)");
+    assert_eq!(result, "yề", "yề: tone on ê, no auto-u (P2-5)");
     hc_session_free(session);
 }
 
@@ -1418,7 +1419,41 @@ fn tone_edge_case_ieu_circumflex() {
     let session = hc_session_new(InputMode::Telex as i32, 0);
     let mut req = key_request(InputMode::Telex);
     let result = type_raw(session, &mut req, "ieef");
-    assert_eq!(result, "iều", "iều: tone should go on ê (circumflex e)");
+    assert_eq!(result, "iề", "iề: tone on ê, no auto-u (P2-5)");
+    hc_session_free(session);
+}
+
+#[test]
+fn ie_ye_no_spurious_u_p2_5() {
+    // P2-5: applying a tone to a syllable ending in "iê"/"yê" must NOT append a
+    // stray u. "viê" + nặng is "việ" (awaiting a coda), not "việu".
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    assert_eq!(type_raw(session, &mut req, "vieej"), "việ");
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "vieejt"), "việt");
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "Vieej"), "Việ"); // uppercase preserved
+    hc_session_reset(session);
+    // Genuine iêu/yêu words still compose when the u IS typed.
+    assert_eq!(type_raw(session, &mut req, "yeeus"), "yếu");
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "nhieeuf"), "nhiều");
+    // Tone-first, then coda must complete cleanly (guards against re-introducing
+    // any iê/yê auto-completion).
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "bieejn"), "biện");
+    hc_session_free(session);
+
+    // The normalization is shared, so VNI and VIQR must not append a u either.
+    let session = hc_session_new(InputMode::Vni as i32, 0);
+    let mut req = key_request(InputMode::Vni);
+    assert_eq!(type_raw(session, &mut req, "vie65"), "việ");
+    hc_session_free(session);
+
+    let session = hc_session_new(InputMode::Viqr as i32, 0);
+    let mut req = key_request(InputMode::Viqr);
+    assert_eq!(type_raw(session, &mut req, "vie^."), "việ");
     hc_session_free(session);
 }
 
