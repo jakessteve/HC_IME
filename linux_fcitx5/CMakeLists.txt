@@ -23,7 +23,12 @@ add_custom_command(
 
 add_custom_target(hc_core_rust ALL DEPENDS ${HC_CORE_SHARED})
 
-add_fcitx5_addon(hcime src/hcime.cpp)
+add_fcitx5_addon(hcime
+    src/hcime.cpp
+    src/hcime_key_handler.cpp
+    src/hcime_candidate_adapter.cpp
+    src/hcime_status_menu.cpp
+)
 add_dependencies(hcime hc_core_rust)
 target_include_directories(hcime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_directories(hcime PRIVATE ${HC_CORE_TARGET_DIR}/release)
@@ -35,3 +40,8 @@ install(TARGETS hcime DESTINATION ${FCITX_INSTALL_ADDONDIR})
 install(FILES ${HC_CORE_SHARED} DESTINATION ${FCITX_INSTALL_ADDONDIR})
 install(FILES fcitx/hcime.conf DESTINATION ${FCITX_INSTALL_PKGDATADIR}/addon)
 install(FILES fcitx/hcime-inputmethod.conf DESTINATION ${FCITX_INSTALL_PKGDATADIR}/inputmethod RENAME hcime.conf)
+install(FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/../hc_core/data/han_nom_dict.bin
+    ${CMAKE_CURRENT_SOURCE_DIR}/../hc_core/data/han_nom_phrase_dict.bin
+    DESTINATION ${FCITX_INSTALL_PKGDATADIR}/hcime/data
+)

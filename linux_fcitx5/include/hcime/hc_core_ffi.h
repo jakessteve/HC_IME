@@ -212,6 +212,37 @@ void hc_session_reset_hannom_learning(void* session);
 void hc_session_flush_hannom_learning(void* session);
 int32_t hc_nom_dict_status(void* session);
 
+typedef struct HC_KeyRequestV2 {
+    int32_t kind;
+    const char* text;
+    int32_t composition_method;
+    uint8_t translation_target;
+    uint8_t legacy_tone;
+    uint8_t spell_check;
+    uint8_t auto_restore;
+    uint8_t quick_consonants;
+    uint8_t english_protection;
+    uint8_t macro_in_english;
+    uint8_t esc_restore_raw;
+} HC_KeyRequestV2;
+
+typedef struct HC_KeyResultV2 {
+    const char* composition_string;
+    size_t composition_len;
+    int32_t status_flag;
+    int32_t error_code;
+    int32_t spell_check_status;
+    uint8_t handled;
+    const HC_HanNomCandidateText* candidates;
+    uint16_t candidate_count;
+    uint16_t total_candidate_count;
+} HC_KeyResultV2;
+
+#define TRANSLATION_TARGET_VIETNAMESE 0
+#define TRANSLATION_TARGET_HAN_NOM 1
+
+int32_t hc_session_handle_key_v4(void* session, const HC_KeyRequestV2* request, HC_KeyResultV2* result);
+
 #ifdef __cplusplus
 }
 #endif

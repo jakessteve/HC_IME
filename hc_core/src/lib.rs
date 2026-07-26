@@ -3,11 +3,14 @@ use std::ffi::{c_char, CStr};
 use std::ptr;
 
 pub mod compose;
+pub mod composition;
 pub mod han_nom;
 mod language;
+pub mod platform;
 mod quick_consonants;
 mod session;
 mod transform;
+pub mod translation;
 mod types;
 mod vowel;
 
@@ -18,14 +21,12 @@ mod tests;
 
 pub use types::*;
 
+use session::Session;
+
+use composition::{get_global_macros, vni_digit_transforms_buffer};
 use language::is_known_english_word;
-use session::{render_raw_input, vni_digit_transforms_buffer, NomTextCandidate, Session};
 use transform::{apply_circumflex, apply_telex_w, apply_tone_to_word};
 
-use crate::han_nom::{
-    get_global_dict, get_global_phrase_dict, load_user_phrase_dict, normalize_phrase_reading,
-    PhraseHistory,
-};
 use vowel::strip_all_marks;
 
 thread_local! {
@@ -33,479 +34,8 @@ thread_local! {
 }
 
 impl Session {
-    fn set_hannom_options(&mut self, options: &HC_HanNomOptions) {
-        self.phrase_prediction_enabled = options.phrase_prediction != 0;
-        self.phrase_learning_enabled = options.learning_enabled != 0;
-        if !options.history_path.is_null() {
-            if let Some(path) = key_text(options.history_path) {
-                if !path.is_empty() {
-                    self.phrase_history_path = std::path::PathBuf::from(path);
-                }
-            }
-        }
-        self.phrase_history = PhraseHistory::load(&self.phrase_history_path);
-    }
-
-    fn set_hannom_options_v2(&mut self, options: &HC_HanNomOptionsV2) {
-        self.set_hannom_options(&HC_HanNomOptions {
-            phrase_prediction: options.phrase_prediction,
-            learning_enabled: options.learning_enabled,
-            history_path: options.history_path,
-        });
-        self.user_phrase_path = None;
-        if !options.user_phrase_path.is_null() {
-            if let Some(path) = key_text(options.user_phrase_path).filter(|path| !path.is_empty()) {
-                self.user_phrase_path = Some(std::path::PathBuf::from(path));
-            }
-        }
-        self.reload_user_phrase_entries();
-    }
-
-    fn reload_user_phrase_entries(&mut self) {
-        self.user_phrase_entries.clear();
-        if let Some(path) = self.user_phrase_path.as_deref() {
-            self.user_phrase_entries = load_user_phrase_dict(path).0;
-        }
-    }
-
-    fn phrase_reading(&self) -> String {
-        match &self.phrase_first {
-            Some(first) if self.buffer.is_empty() => format!("{first} "),
-            Some(first) => format!("{first} {}", self.buffer),
-            None => self.buffer.clone(),
-        }
-    }
-
-    fn rebuild_phrase_candidates(&mut self) {
-        self.phrase_candidates.clear();
-        let Ok(chars) = get_global_dict() else {
-            return;
-        };
-        let full = self.phrase_reading();
-        if self.phrase_first.is_none() {
-            for (rank, ch) in chars.lookup(&self.buffer).into_iter().enumerate() {
-                self.phrase_candidates.push(NomTextCandidate {
-                    text: ch.to_string(),
-                    reading: self.buffer.clone(),
-                    kind: 3,
-                    system_rank: rank as u32,
-                    source_tier: 1,
-                });
-            }
-            self.sort_phrase_candidates();
-            return;
-        }
-        let Ok(phrases) = get_global_phrase_dict() else {
-            return;
-        };
-        let normalized = normalize_phrase_reading(&full);
-        let exact = !self.buffer.is_empty();
-        let entries = if exact {
-            phrases.exact(&normalized)
-        } else if self.phrase_prediction_enabled {
-            phrases.prefix(&normalized)
-        } else {
-            Vec::new()
-        };
-        for entry in entries {
-            self.phrase_candidates.push(NomTextCandidate {
-                text: entry.glyphs,
-                reading: entry.reading,
-                kind: if exact { 0 } else { 1 },
-                system_rank: entry.system_rank,
-                source_tier: 1,
-            });
-        }
-        for entry in &self.user_phrase_entries {
-            if (exact && entry.reading == normalized)
-                || (!exact
-                    && self.phrase_prediction_enabled
-                    && entry.reading.starts_with(&normalized))
-            {
-                self.phrase_candidates.push(NomTextCandidate {
-                    text: entry.glyphs.clone(),
-                    reading: entry.reading.clone(),
-                    kind: if exact { 0 } else { 1 },
-                    system_rank: entry.system_rank,
-                    source_tier: 0,
-                });
-            }
-        }
-        if exact {
-            let first = self.phrase_first.as_deref().unwrap_or_default();
-            let left = chars.lookup(first);
-            let right = chars.lookup(&self.buffer);
-            for (li, l) in left.into_iter().take(3).enumerate() {
-                for (ri, r) in right.iter().take(3).enumerate() {
-                    self.phrase_candidates.push(NomTextCandidate {
-                        text: format!("{l}{r}"),
-                        reading: normalized.clone(),
-                        kind: 2,
-                        system_rank: (li * 3 + ri) as u32,
-                        source_tier: 2,
-                    });
-                }
-            }
-        }
-        self.sort_phrase_candidates();
-    }
-
-    fn sort_phrase_candidates(&mut self) {
-        self.phrase_candidates.sort_by(|left, right| {
-            let class = left.kind.cmp(&right.kind);
-            if class != std::cmp::Ordering::Equal {
-                return class;
-            }
-            let (lc, lt) = if self.phrase_learning_enabled {
-                self.phrase_history.score(&left.reading, &left.text)
-            } else {
-                (0, 0)
-            };
-            let (rc, rt) = if self.phrase_learning_enabled {
-                self.phrase_history.score(&right.reading, &right.text)
-            } else {
-                (0, 0)
-            };
-            rc.cmp(&lc)
-                .then_with(|| rt.cmp(&lt))
-                .then_with(|| left.source_tier.cmp(&right.source_tier))
-                .then_with(|| left.system_rank.cmp(&right.system_rank))
-                .then_with(|| left.text.cmp(&right.text))
-        });
-        self.phrase_candidates
-            .dedup_by(|left, right| left.text == right.text);
-        if self.phrase_candidate_page * 9 >= self.phrase_candidates.len() {
-            self.phrase_candidate_page = 0;
-        }
-    }
-
-    fn populate_nom_result_v2(&mut self, result: &mut HC_HanNomResultV2, handled: u8) {
-        self.rebuild_phrase_candidates();
-        self.reading_buffer = self.phrase_reading();
-        result.status_flag = HCStatusFlag::InProgress as i32;
-        result.error_code = HCErrorCode::None as i32;
-        result.reading = self.reading_buffer.as_ptr();
-        result.reading_len = self.reading_buffer.len().min(u16::MAX as usize) as u16;
-        result.handled = handled;
-        let start = self.phrase_candidate_page * 9;
-        let end = (start + 9).min(self.phrase_candidates.len());
-        self.ffi_phrase_candidates_buf.clear();
-        for candidate in &self.phrase_candidates[start..end] {
-            self.ffi_phrase_candidates_buf.push(HC_HanNomCandidateText {
-                text: candidate.text.as_ptr(),
-                text_len: candidate.text.len().min(u16::MAX as usize) as u16,
-                reading: candidate.reading.as_ptr(),
-                reading_len: candidate.reading.len().min(u16::MAX as usize) as u16,
-                kind: candidate.kind,
-            });
-        }
-        result.candidates = if self.ffi_phrase_candidates_buf.is_empty() {
-            ptr::null()
-        } else {
-            self.ffi_phrase_candidates_buf.as_ptr()
-        };
-        result.candidate_count = self.ffi_phrase_candidates_buf.len() as u16;
-    }
-
-    fn populate_nom_result_v3(&mut self, result: &mut HC_HanNomResultV3, handled: u8) {
-        const MAX_CANDIDATES: usize = 256;
-        self.rebuild_phrase_candidates();
-        self.reading_buffer = self.phrase_reading();
-        self.ffi_phrase_candidates_buf.clear();
-        let total = self.phrase_candidates.len();
-        for candidate in self.phrase_candidates.iter().take(MAX_CANDIDATES) {
-            self.ffi_phrase_candidates_buf.push(HC_HanNomCandidateText {
-                text: candidate.text.as_ptr(),
-                text_len: candidate.text.len().min(u16::MAX as usize) as u16,
-                reading: candidate.reading.as_ptr(),
-                reading_len: candidate.reading.len().min(u16::MAX as usize) as u16,
-                kind: candidate.kind,
-            });
-        }
-        result.status_flag = HCStatusFlag::InProgress as i32;
-        result.error_code = HCErrorCode::None as i32;
-        result.reading = self.reading_buffer.as_ptr();
-        result.reading_len = self.reading_buffer.len().min(u16::MAX as usize) as u16;
-        result.candidates = if self.ffi_phrase_candidates_buf.is_empty() {
-            ptr::null()
-        } else {
-            self.ffi_phrase_candidates_buf.as_ptr()
-        };
-        result.candidate_count = self.ffi_phrase_candidates_buf.len() as u16;
-        result.total_candidate_count = total.min(u16::MAX as usize) as u16;
-        result.page_size = 9;
-        result.truncated = (total > MAX_CANDIDATES) as u8;
-        result.handled = handled;
-    }
-
-    fn commit_phrase_text(
-        &mut self,
-        text: String,
-        _reading: String,
-        result: &mut HC_HanNomResultV2,
-    ) {
-        self.ffi_v2_output = text;
-        result.status_flag = HCStatusFlag::Commit as i32;
-        result.error_code = HCErrorCode::None as i32;
-        result.reading = self.ffi_v2_output.as_ptr();
-        result.reading_len = self.ffi_v2_output.len().min(u16::MAX as usize) as u16;
-        result.candidates = ptr::null();
-        result.candidate_count = 0;
-        result.handled = 1;
-        self.reset();
-    }
-
-    fn record_phrase_selection(&mut self, reading: &str, glyphs: &str) {
-        if self.phrase_learning_enabled && !reading.is_empty() {
-            self.phrase_history.record(reading, glyphs);
-            self.phrase_history_dirty = true;
-        }
-    }
-
-    fn flush_hannom_learning(&mut self) {
-        if self.phrase_history_dirty
-            && self.phrase_learning_enabled
-            && self
-                .phrase_history
-                .persist(&self.phrase_history_path)
-                .is_ok()
-        {
-            self.phrase_history_dirty = false;
-        }
-    }
-
-    fn handle_han_nom_key_v2(
-        &mut self,
-        request: &HC_KeyRequest,
-        result: &mut HC_HanNomResultV2,
-    ) -> i32 {
-        self.ffi_v2_output.clear();
-        *result = HC_HanNomResultV2 {
-            status_flag: HCStatusFlag::InProgress as i32,
-            error_code: HCErrorCode::None as i32,
-            reading: ptr::null(),
-            reading_len: 0,
-            candidates: ptr::null(),
-            candidate_count: 0,
-            handled: 0,
-        };
-        self.mode = match InputMode::try_from(request.input_mode) {
-            Ok(value) => value,
-            Err(_) => {
-                result.error_code = HCErrorCode::InvalidInputMode as i32;
-                return 0;
-            }
-        };
-        let Some(kind) = key_kind(request.kind) else {
-            return 0;
-        };
-        let text = key_text(request.text).unwrap_or("");
-        match kind {
-            HCKeyKind::Escape => {
-                if self.phrase_first.is_some() && self.buffer.is_empty() {
-                    self.phrase_first = None;
-                    self.phrase_candidate_page = 0;
-                } else {
-                    self.reset();
-                }
-                self.populate_nom_result_v2(result, 1);
-                1
-            }
-            HCKeyKind::Backspace => {
-                self.phrase_candidate_page = 0;
-                if self.raw_buffer.is_empty() && self.phrase_first.is_some() {
-                    self.buffer = self.phrase_first.take().unwrap_or_default();
-                    self.raw_buffer = self.buffer.clone();
-                    self.rendered_raw_len = self.raw_buffer.len();
-                } else if !self.raw_buffer.is_empty() {
-                    self.raw_buffer.pop();
-                    self.render_from_raw();
-                }
-                self.populate_nom_result_v2(result, 1);
-                1
-            }
-            HCKeyKind::Space => {
-                if self.buffer.is_empty() && self.phrase_first.is_none() {
-                    return 0;
-                }
-                if self.phrase_first.is_none() {
-                    self.phrase_first = Some(normalize_phrase_reading(&self.buffer));
-                    self.phrase_candidate_page = 0;
-                    self.buffer.clear();
-                    self.raw_buffer.clear();
-                    self.rendered_raw_len = 0;
-                    self.populate_nom_result_v2(result, 1);
-                    return 1;
-                }
-                self.populate_nom_result_v2(result, 1);
-                1
-            }
-            HCKeyKind::Enter => {
-                if self.buffer.is_empty() && self.phrase_first.is_none() {
-                    return 0;
-                }
-                let raw = normalize_phrase_reading(&self.phrase_reading());
-                if self.phrase_first.is_some() && !self.buffer.is_empty() {
-                    self.rebuild_phrase_candidates();
-                    let output = self
-                        .phrase_candidates
-                        .first()
-                        .map(|candidate| candidate.text.clone())
-                        .unwrap_or_else(|| raw.clone());
-                    if !self.phrase_candidates.is_empty() {
-                        self.record_phrase_selection(&raw, &output);
-                    }
-                    self.commit_phrase_text(output, raw, result);
-                } else {
-                    self.commit_phrase_text(raw, String::new(), result);
-                }
-                1
-            }
-            HCKeyKind::Printable => {
-                let ch = text.chars().next().unwrap_or('\0');
-                if matches!(ch, '=' | ']' | '+') {
-                    self.rebuild_phrase_candidates();
-                    if (self.phrase_candidate_page + 1) * 9 < self.phrase_candidates.len() {
-                        self.phrase_candidate_page += 1;
-                    }
-                    self.populate_nom_result_v2(result, 1);
-                    return 1;
-                }
-                if matches!(ch, '-' | '[') {
-                    self.phrase_candidate_page = self.phrase_candidate_page.saturating_sub(1);
-                    self.populate_nom_result_v2(result, 1);
-                    return 1;
-                }
-                self.phrase_candidate_page = 0;
-                if is_nom_punctuation(ch) && self.phrase_first.is_some() {
-                    self.rebuild_phrase_candidates();
-                    let reading = normalize_phrase_reading(&self.phrase_reading());
-                    let output = self
-                        .phrase_candidates
-                        .first()
-                        .map(|candidate| candidate.text.clone())
-                        .unwrap_or(reading.clone());
-                    if !self.phrase_candidates.is_empty() {
-                        self.record_phrase_selection(&reading, &output);
-                    }
-                    self.commit_phrase_text(format!("{output}{ch}"), reading, result);
-                    return 1;
-                }
-                if matches!(self.mode, InputMode::HanNomVni | InputMode::Vni) && ch.is_ascii_digit()
-                {
-                    if self.raw_buffer.is_empty() {
-                        result.handled = 0;
-                        return 0;
-                    }
-                    compose::TypingEngine::apply_vni_trigger(
-                        &mut self.buffer,
-                        ch,
-                        self.legacy_tone,
-                    );
-                    self.raw_buffer.push(ch);
-                    self.populate_nom_result_v2(result, 1);
-                    return 1;
-                }
-                if ch.is_ascii_digit() {
-                    result.handled = 0;
-                    return 0;
-                }
-                if self.raw_buffer.len() < 64 {
-                    self.raw_buffer.push_str(text);
-                    self.render_from_raw();
-                }
-                self.populate_nom_result_v2(result, 1);
-                1
-            }
-            _ => 0,
-        }
-    }
-
-    fn select_han_nom_candidate_v2(&mut self, index: usize, result: &mut HC_HanNomResultV2) -> i32 {
-        self.rebuild_phrase_candidates();
-        let index = self.phrase_candidate_page * 9 + index;
-        let Some(candidate) = self.phrase_candidates.get(index).cloned() else {
-            return 0;
-        };
-        self.record_phrase_selection(&candidate.reading, &candidate.text);
-        self.commit_phrase_text(candidate.text, candidate.reading, result);
-        1
-    }
-
-    fn handle_han_nom_key_v3(
-        &mut self,
-        request: &HC_KeyRequest,
-        result: &mut HC_HanNomResultV3,
-    ) -> i32 {
-        *result = HC_HanNomResultV3 {
-            status_flag: HCStatusFlag::InProgress as i32,
-            error_code: HCErrorCode::None as i32,
-            reading: ptr::null(),
-            reading_len: 0,
-            candidates: ptr::null(),
-            candidate_count: 0,
-            total_candidate_count: 0,
-            page_size: 9,
-            truncated: 0,
-            handled: 0,
-        };
-        if matches!(key_kind(request.kind), Some(HCKeyKind::Printable))
-            && matches!(
-                key_text(request.text).unwrap_or(""),
-                "=" | "+" | "]" | "-" | "["
-            )
-        {
-            // V3 deliberately keeps paging in Fcitx; never mutate the frozen V2 page cursor.
-            self.populate_nom_result_v3(result, 1);
-            return 1;
-        }
-        let mut v2 = HC_HanNomResultV2 {
-            status_flag: 0,
-            error_code: 0,
-            reading: ptr::null(),
-            reading_len: 0,
-            candidates: ptr::null(),
-            candidate_count: 0,
-            handled: 0,
-        };
-        let handled = self.handle_han_nom_key_v2(request, &mut v2);
-        if handled == 0 {
-            return 0;
-        }
-        if v2.status_flag == HCStatusFlag::Commit as i32 {
-            result.status_flag = v2.status_flag;
-            result.error_code = v2.error_code;
-            result.reading = v2.reading;
-            result.reading_len = v2.reading_len;
-            result.handled = v2.handled;
-        } else {
-            self.populate_nom_result_v3(result, v2.handled);
-        }
-        handled
-    }
-
-    fn select_han_nom_candidate_v3(&mut self, index: usize, result: &mut HC_HanNomResultV3) -> i32 {
-        self.rebuild_phrase_candidates();
-        let Some(candidate) = self.phrase_candidates.get(index).cloned() else {
-            return 0;
-        };
-        self.record_phrase_selection(&candidate.reading, &candidate.text);
-        self.ffi_v2_output = candidate.text;
-        result.status_flag = HCStatusFlag::Commit as i32;
-        result.error_code = HCErrorCode::None as i32;
-        result.reading = self.ffi_v2_output.as_ptr();
-        result.reading_len = self.ffi_v2_output.len().min(u16::MAX as usize) as u16;
-        result.candidates = ptr::null();
-        result.candidate_count = 0;
-        result.total_candidate_count = 0;
-        result.page_size = 9;
-        result.truncated = 0;
-        result.handled = 1;
-        self.reset();
-        1
-    }
     fn handle_key(&mut self, request: &HC_KeyRequest) -> HC_KeyResult {
-        self.mode = match InputMode::try_from(request.input_mode) {
+        self.composition.mode = match InputMode::try_from(request.input_mode) {
             Ok(mode) => mode,
             Err(_) => {
                 return HC_KeyResult {
@@ -514,13 +44,14 @@ impl Session {
                 }
             }
         };
-        self.legacy_tone = request.legacy_tone != 0;
-        self.spell_check = request.spell_check != 0;
-        self.auto_restore = request.auto_restore != 0;
-        self.quick_consonants_enabled = request.quick_consonants != 0;
-        self.english_protection = EnglishProtectionLevel::from(request.english_protection);
-        self.macro_in_english = request.macro_in_english != 0;
-        self.esc_restore_raw = request.esc_restore_raw != 0;
+        self.composition.legacy_tone = request.legacy_tone != 0;
+        self.composition.spell_check = request.spell_check != 0;
+        self.composition.auto_restore = request.auto_restore != 0;
+        self.composition.quick_consonants_enabled = request.quick_consonants != 0;
+        self.composition.english_protection =
+            EnglishProtectionLevel::from(request.english_protection);
+        self.composition.macro_in_english = request.macro_in_english != 0;
+        self.composition.esc_restore_raw = request.esc_restore_raw != 0;
 
         if let Some(kind) = key_kind(request.kind) {
             match kind {
@@ -531,7 +62,7 @@ impl Session {
                     };
                 }
                 HCKeyKind::Escape => {
-                    if let Some(raw) = self.try_esc_restore_raw() {
+                    if let Some(raw) = self.composition.try_esc_restore_raw() {
                         return HC_KeyResult {
                             state: hc_state_from_string(
                                 &raw,
@@ -541,7 +72,8 @@ impl Session {
                             handled: 1,
                         };
                     }
-                    if self.buffer.is_empty() && self.last_commit.is_empty() {
+                    if self.composition.buffer.is_empty() && self.composition.last_commit.is_empty()
+                    {
                         return HC_KeyResult {
                             state: hc_error_state(HCErrorCode::None),
                             handled: 0,
@@ -558,45 +90,47 @@ impl Session {
                     };
                 }
                 HCKeyKind::Backspace => {
-                    if !self.raw_buffer.is_empty() {
-                        match self.mode {
+                    if !self.composition.raw_buffer.is_empty() {
+                        match self.composition.mode {
                             InputMode::Vni => {
-                                self.raw_buffer = vni_raw_after_visible_backspace(
-                                    &self.raw_buffer,
-                                    &self.buffer,
-                                    self.legacy_tone,
+                                self.composition.raw_buffer = vni_raw_after_visible_backspace(
+                                    &self.composition.raw_buffer,
+                                    &self.composition.buffer,
+                                    self.composition.legacy_tone,
                                 );
-                                self.render_from_raw();
+                                self.composition.render_from_raw();
                             }
                             _ => {
-                                self.raw_buffer.pop();
-                                if self.quick_consonants_enabled {
-                                    self.quick_consonant_lock =
-                                        self.quick_consonant_lock.min(self.raw_buffer.len());
+                                self.composition.raw_buffer.pop();
+                                if self.composition.quick_consonants_enabled {
+                                    self.composition.quick_consonant_lock = self
+                                        .composition
+                                        .quick_consonant_lock
+                                        .min(self.composition.raw_buffer.len());
                                 }
-                                self.render_from_raw();
+                                self.composition.render_from_raw();
                             }
                         }
-                        if self.raw_buffer.is_empty() {
-                            self.reconversion_active = false;
+                        if self.composition.raw_buffer.is_empty() {
+                            self.composition.reconversion_active = false;
                         }
-                        return self.emit_preedit(true);
+                        return self.composition.emit_preedit(true);
                     }
 
-                    if self.can_edit_last_commit() {
-                        self.buffer = self.last_commit.clone();
-                        self.raw_buffer = if self.last_raw.is_empty() {
-                            strip_all_marks(&self.buffer)
+                    if self.composition.can_edit_last_commit() {
+                        self.composition.buffer = self.composition.last_commit.clone();
+                        self.composition.raw_buffer = if self.composition.last_raw.is_empty() {
+                            strip_all_marks(&self.composition.buffer)
                         } else {
-                            self.last_raw.clone()
+                            self.composition.last_raw.clone()
                         };
-                        self.reconversion_active = true;
-                        self.last_commit.clear();
-                        self.last_raw.clear();
-                        self.last_commit_time = None;
+                        self.composition.reconversion_active = true;
+                        self.composition.last_commit.clear();
+                        self.composition.last_raw.clear();
+                        self.composition.last_commit_time = None;
                         return HC_KeyResult {
                             state: hc_state_from_string(
-                                &self.buffer,
+                                &self.composition.buffer,
                                 HCStatusFlag::ReconversionActive,
                                 HCErrorCode::None,
                             ),
@@ -610,7 +144,7 @@ impl Session {
                     };
                 }
                 HCKeyKind::Enter | HCKeyKind::Space | HCKeyKind::Boundary => {
-                    if self.buffer.is_empty() {
+                    if self.composition.buffer.is_empty() {
                         return HC_KeyResult {
                             state: hc_error_state(HCErrorCode::None),
                             handled: 0,
@@ -618,15 +152,15 @@ impl Session {
                     }
 
                     if kind == HCKeyKind::Boundary
-                        && self.mode == InputMode::Viqr
-                        && self.try_boundary_trigger(request.text)
+                        && self.composition.mode == InputMode::Viqr
+                        && self.composition.try_boundary_trigger(request.text)
                     {
-                        return self.emit_preedit(true);
+                        return self.composition.emit_preedit(true);
                     }
 
-                    self.apply_end_quick_consonants_if_enabled();
+                    self.composition.apply_end_quick_consonants_if_enabled();
 
-                    let commit = self.commit_current();
+                    let commit = self.composition.commit_current();
                     return HC_KeyResult {
                         state: commit,
                         handled: 1,
@@ -640,7 +174,7 @@ impl Session {
                         };
                     };
 
-                    self.reconversion_active = false;
+                    self.composition.reconversion_active = false;
                     let mut chars = text.chars();
                     let Some(first_char) = chars.next() else {
                         return HC_KeyResult {
@@ -654,52 +188,69 @@ impl Session {
                     // For tone digits (1-5), only reopen when the committed word has no tone,
                     // so that standalone numbers after a toned word pass through as literals.
                     // For diacritic digits (6-9) and 0, use the normal transform check.
-                    let auto_reopen_allowed = self.can_edit_last_commit() && {
+                    let auto_reopen_allowed = self.composition.can_edit_last_commit() && {
                         if ('1'..='5').contains(&first_char) {
-                            !self.last_commit.chars().any(|ch| {
+                            !self.composition.last_commit.chars().any(|ch| {
                                 crate::vowel::vowel_signature(ch)
                                     .is_some_and(|(_, _, t)| t != crate::types::Tone::Flat)
                             })
                         } else {
                             vni_digit_transforms_buffer(
-                                &self.last_commit,
+                                &self.composition.last_commit,
                                 first_char,
-                                self.legacy_tone,
+                                self.composition.legacy_tone,
                             )
                         }
                     };
-                    if self.mode == InputMode::Vni
+                    if self.composition.mode == InputMode::Vni
                         && single_char
                         && first_char.is_ascii_digit()
-                        && self.buffer.is_empty()
-                        && self.raw_buffer.is_empty()
+                        && self.composition.buffer.is_empty()
+                        && self.composition.raw_buffer.is_empty()
                         && auto_reopen_allowed
                     {
-                        self.buffer = self.last_commit.clone();
-                        self.raw_buffer = if self.last_raw.is_empty() {
-                            strip_all_marks(&self.buffer)
+                        self.composition.buffer = self.composition.last_commit.clone();
+                        self.composition.raw_buffer = if self.composition.last_raw.is_empty() {
+                            strip_all_marks(&self.composition.buffer)
                         } else {
-                            self.last_raw.clone()
+                            self.composition.last_raw.clone()
                         };
                     }
 
-                    self.last_commit.clear();
-                    self.last_raw.clear();
-                    self.last_commit_time = None;
+                    self.composition.last_commit.clear();
+                    self.composition.last_raw.clear();
+                    self.composition.last_commit_time = None;
 
-                    if self.mode == InputMode::Vni && single_char && first_char.is_ascii_digit() {
-                        if self.buffer.is_empty() && self.raw_buffer.is_empty() {
+                    if self.composition.mode == InputMode::Vni
+                        && single_char
+                        && first_char.is_ascii_digit()
+                    {
+                        if self.composition.buffer.is_empty()
+                            && self.composition.raw_buffer.is_empty()
+                        {
                             return HC_KeyResult {
                                 state: hc_error_state(HCErrorCode::None),
                                 handled: 0,
                             };
                         }
 
-                        if !vni_digit_transforms_buffer(&self.buffer, first_char, self.legacy_tone)
-                        {
-                            self.raw_buffer.push(first_char);
-                            self.buffer.push(first_char);
-                            let commit = self.commit_current();
+                        let mut probe = self.composition.buffer.clone();
+                        let transforms = crate::compose::TypingEngine::apply_vni_trigger(
+                            &mut probe,
+                            first_char,
+                            self.composition.legacy_tone,
+                        );
+                        if !transforms {
+                            if probe != self.composition.buffer {
+                                self.composition.buffer = probe;
+                                self.composition.raw_buffer.push(first_char);
+                                self.composition.buffer.push(first_char);
+                                self.composition.update_spell_check_status();
+                                return self.composition.emit_preedit(true);
+                            }
+                            self.composition.raw_buffer.push(first_char);
+                            self.composition.buffer.push(first_char);
+                            let commit = self.composition.commit_current();
                             return HC_KeyResult {
                                 state: commit,
                                 handled: 1,
@@ -707,13 +258,13 @@ impl Session {
                         }
                     }
 
-                    self.raw_buffer.push_str(text);
-                    self.render_from_raw();
-                    return self.emit_preedit(true);
+                    self.composition.raw_buffer.push_str(text);
+                    self.composition.render_from_raw();
+                    return self.composition.emit_preedit(true);
                 }
                 HCKeyKind::Undo => {
-                    if self.undo() {
-                        return self.emit_preedit(true);
+                    if self.composition.undo() {
+                        return self.composition.emit_preedit(true);
                     }
                     return HC_KeyResult {
                         state: hc_error_state(HCErrorCode::None),
@@ -726,300 +277,6 @@ impl Session {
         HC_KeyResult {
             state: hc_error_state(HCErrorCode::InvalidEditTrigger),
             handled: 0,
-        }
-    }
-
-    pub fn handle_han_nom_key(
-        &mut self,
-        request: &HC_KeyRequest,
-        result: &mut HC_HanNomResult,
-    ) -> i32 {
-        result.status_flag = HCStatusFlag::InProgress as i32;
-        result.error_code = HCErrorCode::None as i32;
-        result.handled = 0;
-        result.reading_len = 0;
-        result.candidate_count = 0;
-        result.page = 0;
-        result.total_candidates = 0;
-        result.has_more = 0;
-        result.candidates = ptr::null();
-
-        let mode = match InputMode::try_from(request.input_mode) {
-            Ok(m) => m,
-            Err(_) => {
-                result.error_code = HCErrorCode::InvalidInputMode as i32;
-                return 0;
-            }
-        };
-        self.mode = mode;
-
-        let dict = match han_nom::get_global_dict() {
-            Ok(d) => d,
-            Err(err) => {
-                result.error_code = err as i32;
-                return 0;
-            }
-        };
-
-        let kind = match key_kind(request.kind) {
-            Some(k) => k,
-            None => return 0,
-        };
-
-        let text = key_text(request.text).unwrap_or("");
-
-        // Phase B (Candidate Selection)
-        if self.nom_phase == NomPhase::Candidate {
-            match kind {
-                HCKeyKind::Space => {
-                    if !self.nom_candidates.is_empty() {
-                        let idx = self.candidate_page * 9;
-                        if idx < self.nom_candidates.len() {
-                            let selected_char = self.nom_candidates[idx];
-                            self.commit_nom_char(selected_char, result);
-                            return 1;
-                        }
-                    }
-                    self.reset();
-                    result.handled = 1;
-                    return 1;
-                }
-                HCKeyKind::Enter => {
-                    // CJK standard: Enter in candidate phase commits raw pre-edit reading (Quốc Ngữ)
-                    let commit_str = self.buffer.clone();
-                    self.reset();
-                    result.status_flag = HCStatusFlag::Commit as i32;
-                    let bytes = commit_str.as_bytes();
-                    let len = bytes.len().min(255);
-                    result.reading[..len].copy_from_slice(&bytes[..len]);
-                    result.reading_len = len as u16;
-                    result.handled = 1;
-                    return 1;
-                }
-                HCKeyKind::Escape => {
-                    self.nom_phase = NomPhase::Reading;
-                    self.populate_nom_result(result, 1);
-                    return 1;
-                }
-                HCKeyKind::Backspace => {
-                    self.nom_phase = NomPhase::Reading;
-                    if !self.raw_buffer.is_empty() {
-                        self.raw_buffer.pop();
-                        self.render_from_raw();
-                    }
-                    self.populate_nom_result(result, 1);
-                    return 1;
-                }
-                HCKeyKind::Printable => {
-                    let first_ch = text.chars().next().unwrap_or('\0');
-                    if first_ch.is_ascii_digit() && first_ch != '0' {
-                        let digit_val = first_ch.to_digit(10).unwrap() as usize;
-                        let idx = self.candidate_page * 9 + (digit_val - 1);
-                        if idx < self.nom_candidates.len() {
-                            let selected_char = self.nom_candidates[idx];
-                            self.commit_nom_char(selected_char, result);
-                            return 1;
-                        }
-                        self.populate_nom_result(result, 1);
-                        return 1;
-                    }
-                    if first_ch == '=' || first_ch == ']' || first_ch == '+' {
-                        if (self.candidate_page + 1) * 9 < self.nom_candidates.len() {
-                            self.candidate_page += 1;
-                        }
-                        self.populate_nom_result(result, 1);
-                        return 1;
-                    }
-                    if first_ch == '-' || first_ch == '[' {
-                        if self.candidate_page > 0 {
-                            self.candidate_page -= 1;
-                        }
-                        self.populate_nom_result(result, 1);
-                        return 1;
-                    }
-                    if is_nom_punctuation(first_ch) {
-                        let mut output = String::new();
-                        let idx = self.candidate_page * 9;
-                        if idx < self.nom_candidates.len() {
-                            output.push(self.nom_candidates[idx]);
-                        } else {
-                            output.push_str(&self.buffer);
-                        }
-                        output.push(first_ch);
-
-                        result.status_flag = HCStatusFlag::Commit as i32;
-                        let bytes = output.as_bytes();
-                        let len = bytes.len().min(255);
-                        result.reading[..len].copy_from_slice(&bytes[..len]);
-                        result.reading_len = len as u16;
-                        result.handled = 1;
-                        self.reset();
-                        return 1;
-                    }
-                    self.nom_phase = NomPhase::Reading;
-                }
-                _ => {
-                    self.nom_phase = NomPhase::Reading;
-                }
-            }
-        }
-
-        // Phase A (Reading)
-        match kind {
-            HCKeyKind::Escape => {
-                self.reset();
-                self.populate_nom_result(result, 1);
-                1
-            }
-            HCKeyKind::Backspace => {
-                if !self.raw_buffer.is_empty() {
-                    match self.mode {
-                        InputMode::Vni | InputMode::HanNomVni => {
-                            self.raw_buffer = vni_raw_after_visible_backspace(
-                                &self.raw_buffer,
-                                &self.buffer,
-                                self.legacy_tone,
-                            );
-                            self.render_from_raw();
-                        }
-                        _ => {
-                            self.raw_buffer.pop();
-                            self.render_from_raw();
-                        }
-                    }
-                }
-                self.populate_nom_result(result, 1);
-                1
-            }
-            HCKeyKind::Space | HCKeyKind::Enter => {
-                if self.buffer.is_empty() {
-                    result.handled = 0;
-                    0
-                } else {
-                    let candidates = dict.lookup(&self.buffer);
-                    if !candidates.is_empty() {
-                        self.nom_candidates = candidates;
-                        self.nom_phase = NomPhase::Candidate;
-                        self.candidate_page = 0;
-                        self.reading_buffer = self.buffer.clone();
-                        self.populate_nom_result(result, 1);
-                        1
-                    } else {
-                        let commit_str = self.buffer.clone();
-                        self.reset();
-                        result.status_flag = HCStatusFlag::Commit as i32;
-                        let bytes = commit_str.as_bytes();
-                        let len = bytes.len().min(255);
-                        result.reading[..len].copy_from_slice(&bytes[..len]);
-                        result.reading_len = len as u16;
-                        result.handled = 1;
-                        1
-                    }
-                }
-            }
-            HCKeyKind::Printable => {
-                let first_ch = text.chars().next().unwrap_or('\0');
-                match self.mode {
-                    InputMode::HanNomVni | InputMode::Vni => {
-                        if first_ch.is_ascii_digit() {
-                            if self.raw_buffer.is_empty() {
-                                result.handled = 0;
-                                return 0;
-                            }
-                            compose::TypingEngine::apply_vni_trigger(
-                                &mut self.buffer,
-                                first_ch,
-                                self.legacy_tone,
-                            );
-                            self.raw_buffer.push(first_ch);
-                            self.populate_nom_result(result, 1);
-                            return 1;
-                        }
-                    }
-                    _ => {
-                        if first_ch.is_ascii_digit() {
-                            result.handled = 0;
-                            return 0;
-                        }
-                    }
-                }
-
-                if self.raw_buffer.len() < 64 {
-                    self.raw_buffer.push_str(text);
-                    self.render_from_raw();
-                }
-                self.populate_nom_result(result, 1);
-                1
-            }
-            _ => {
-                result.handled = 0;
-                0
-            }
-        }
-    }
-
-    fn commit_nom_char(&mut self, ch: char, result: &mut HC_HanNomResult) {
-        let mut utf8_bytes = [0u8; 5];
-        let s = ch.to_string();
-        let bytes = s.as_bytes();
-        let len = bytes.len().min(4);
-        utf8_bytes[..len].copy_from_slice(&bytes[..len]);
-
-        result.status_flag = HCStatusFlag::Commit as i32;
-        result.reading[..len].copy_from_slice(&bytes[..len]);
-        result.reading_len = len as u16;
-        result.handled = 1;
-
-        self.reset();
-    }
-
-    fn populate_nom_result(&mut self, result: &mut HC_HanNomResult, handled: u8) {
-        result.handled = handled;
-        let r_bytes = self.buffer.as_bytes();
-        let r_len = r_bytes.len().min(255);
-        result.reading[..r_len].copy_from_slice(&r_bytes[..r_len]);
-        result.reading_len = r_len as u16;
-
-        if self.nom_phase == NomPhase::Reading && !self.buffer.is_empty() {
-            if let Ok(dict) = get_global_dict() {
-                self.nom_candidates = dict.lookup(&self.buffer);
-            }
-        }
-
-        if !self.nom_candidates.is_empty() && !self.buffer.is_empty() {
-            let start = self.candidate_page * 9;
-            let end = (start + 9).min(self.nom_candidates.len());
-            let page_candidates = &self.nom_candidates[start..end];
-
-            self.ffi_candidates_buf.clear();
-            for &ch in page_candidates {
-                let mut candidate_char = HC_CandidateChar {
-                    utf8: [0u8; 5],
-                    byte_len: 0,
-                };
-                let s = ch.to_string();
-                let b = s.as_bytes();
-                let b_len = b.len().min(4);
-                candidate_char.utf8[..b_len].copy_from_slice(&b[..b_len]);
-                candidate_char.byte_len = b_len as u8;
-                self.ffi_candidates_buf.push(candidate_char);
-            }
-
-            result.candidates = self.ffi_candidates_buf.as_ptr();
-            result.candidate_count = self.ffi_candidates_buf.len() as u16;
-            result.page = self.candidate_page as u16;
-            result.total_candidates = self.nom_candidates.len() as u16;
-            result.has_more = if end < self.nom_candidates.len() {
-                1
-            } else {
-                0
-            };
-        } else {
-            result.candidates = ptr::null();
-            result.candidate_count = 0;
-            result.page = 0;
-            result.total_candidates = 0;
-            result.has_more = 0;
         }
     }
 }
@@ -1104,32 +361,8 @@ fn candidate_if_matches(
         })
         .collect();
 
-    (render_raw_input(&candidate, InputMode::Vni, legacy_tone) == target).then_some(candidate)
-}
-
-fn is_nom_punctuation(ch: char) -> bool {
-    matches!(
-        ch,
-        '.' | ','
-            | '!'
-            | '?'
-            | ';'
-            | ':'
-            | '('
-            | ')'
-            | '"'
-            | '\''
-            | '/'
-            | '\\'
-            | '@'
-            | '#'
-            | '$'
-            | '%'
-            | '^'
-            | '&'
-            | '*'
-            | '~'
-    )
+    (composition::render_raw_input(&candidate, InputMode::Vni, legacy_tone) == target)
+        .then_some(candidate)
 }
 
 #[no_mangle]
@@ -1148,7 +381,9 @@ pub extern "C" fn hc_session_free(session: *mut std::ffi::c_void) {
     }
     unsafe {
         let mut session = Box::from_raw(session as *mut Session);
-        session.flush_hannom_learning();
+        if let Some(t) = session.translator_mut() {
+            t.flush_hannom_learning();
+        }
         drop(session);
     }
 }
@@ -1160,23 +395,25 @@ pub extern "C" fn hc_session_reset(session: *mut std::ffi::c_void) {
     }
     unsafe {
         let session = &mut *(session as *mut Session);
-        session.reset();
-        session.reload_user_phrase_entries();
+        session.composition.reset();
+        if let Some(t) = session.translator_mut() {
+            t.reset();
+            t.reload_user_phrase_entries();
+        }
     }
 }
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn hc_session_add_macro(
-    session: *mut std::ffi::c_void,
+    _session: *mut std::ffi::c_void,
     key: *const c_char,
     value: *const c_char,
 ) {
-    if session.is_null() || key.is_null() || value.is_null() {
+    if key.is_null() || value.is_null() {
         return;
     }
     unsafe {
-        let session = &mut *(session as *mut Session);
         let key_str = match CStr::from_ptr(key).to_str() {
             Ok(s) => s,
             Err(_) => return,
@@ -1185,19 +422,16 @@ pub extern "C" fn hc_session_add_macro(
             Ok(s) => s,
             Err(_) => return,
         };
-        session.add_macro(key_str, value_str);
+        get_global_macros()
+            .write()
+            .unwrap()
+            .insert(key_str.to_lowercase(), value_str.to_string());
     }
 }
 
 #[no_mangle]
-pub extern "C" fn hc_session_clear_macros(session: *mut std::ffi::c_void) {
-    if session.is_null() {
-        return;
-    }
-    unsafe {
-        let session = &mut *(session as *mut Session);
-        session.clear_macros();
-    }
+pub extern "C" fn hc_session_clear_macros(_session: *mut std::ffi::c_void) {
+    get_global_macros().write().unwrap().clear();
 }
 
 #[no_mangle]
@@ -1249,6 +483,148 @@ pub extern "C" fn hc_session_handle_key_utf8(
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn hc_session_handle_key_v4(
+    session: *mut std::ffi::c_void,
+    request: *const HC_KeyRequestV2,
+    result: *mut HC_KeyResultV2,
+) -> i32 {
+    if session.is_null() || request.is_null() || result.is_null() {
+        if !result.is_null() {
+            unsafe {
+                *result = HC_KeyResultV2 {
+                    composition_string: ptr::null(),
+                    composition_len: 0,
+                    status_flag: HCStatusFlag::InProgress as i32,
+                    error_code: HCErrorCode::NullPointer as i32,
+                    spell_check_status: HCSpellCheckStatus::Valid as i32,
+                    handled: 0,
+                    candidates: ptr::null(),
+                    candidate_count: 0,
+                    total_candidate_count: 0,
+                };
+            }
+        }
+        return 0;
+    }
+
+    unsafe {
+        let session = &mut *(session as *mut Session);
+        let req = &*request;
+
+        let composition_method = req.composition_method;
+        let is_han_nom = req.translation_target == TRANSLATION_TARGET_HAN_NOM;
+
+        let input_mode = if is_han_nom {
+            composition_method + 3
+        } else {
+            composition_method
+        };
+
+        let key_request = HC_KeyRequest {
+            kind: req.kind,
+            text: req.text,
+            input_mode,
+            legacy_tone: req.legacy_tone,
+            spell_check: req.spell_check,
+            auto_restore: req.auto_restore,
+            quick_consonants: req.quick_consonants,
+            english_protection: req.english_protection,
+            macro_in_english: req.macro_in_english,
+            esc_restore_raw: req.esc_restore_raw,
+        };
+
+        if is_han_nom {
+            let translator = session.translator.as_mut().and_then(|t| {
+                t.as_any_mut()
+                    .downcast_mut::<crate::translation::HanNomTranslator>()
+            });
+            let composition = &mut session.composition;
+
+            match translator {
+                Some(t) => {
+                    let mut nom_result = HC_HanNomResultV3 {
+                        status_flag: HCStatusFlag::InProgress as i32,
+                        error_code: HCErrorCode::None as i32,
+                        reading: ptr::null(),
+                        reading_len: 0,
+                        candidates: ptr::null(),
+                        candidate_count: 0,
+                        total_candidate_count: 0,
+                        page_size: 9,
+                        truncated: 0,
+                        handled: 0,
+                    };
+                    let handled =
+                        t.handle_han_nom_key_v3(composition, &key_request, &mut nom_result);
+
+                    *result = HC_KeyResultV2 {
+                        composition_string: nom_result.reading,
+                        composition_len: nom_result.reading_len as usize,
+                        status_flag: nom_result.status_flag,
+                        error_code: nom_result.error_code,
+                        spell_check_status: HCSpellCheckStatus::Valid as i32,
+                        handled: nom_result.handled,
+                        candidates: nom_result.candidates,
+                        candidate_count: nom_result.candidate_count,
+                        total_candidate_count: nom_result.total_candidate_count,
+                    };
+                    handled
+                }
+                None => {
+                    *result = HC_KeyResultV2 {
+                        composition_string: ptr::null(),
+                        composition_len: 0,
+                        status_flag: HCStatusFlag::InProgress as i32,
+                        error_code: HCErrorCode::InvalidInputMode as i32,
+                        spell_check_status: HCSpellCheckStatus::Valid as i32,
+                        handled: 0,
+                        candidates: ptr::null(),
+                        candidate_count: 0,
+                        total_candidate_count: 0,
+                    };
+                    0
+                }
+            }
+        } else {
+            let key_result = session.handle_key(&key_request);
+
+            UTF8_RESULT_BUFFER.with(|buffer| {
+                let mut buffer = buffer.borrow_mut();
+                state_to_utf8_into(&key_result.state, &mut buffer);
+
+                let comp_ptr = if buffer.is_empty() {
+                    ptr::null()
+                } else {
+                    buffer.as_ptr()
+                };
+
+                *result = HC_KeyResultV2 {
+                    composition_string: comp_ptr,
+                    composition_len: buffer.len(),
+                    status_flag: key_result.state.status_flag,
+                    error_code: key_result.state.error_code,
+                    spell_check_status: key_result.state.spell_check_status,
+                    handled: key_result.handled,
+                    candidates: ptr::null(),
+                    candidate_count: 0,
+                    total_candidate_count: 0,
+                };
+            });
+
+            let mut state = key_result.state;
+            hc_state_free(&mut state);
+
+            if (*result).handled != 0 {
+                1
+            } else {
+                0
+            }
+        }
+    }
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn hc_compose_with_request(request: *const HC_ComposeRequest) -> HC_State {
     if request.is_null() {
         return hc_error_state(HCErrorCode::NullPointer);
@@ -1296,6 +672,7 @@ pub extern "C" fn hc_compose_with_request(request: *const HC_ComposeRequest) -> 
     }
 
     let rendered = mirror_capitalization(trigger_case, &text);
+
     let lower = vowel::strip_marks_ascii_lower(raw_input);
     if is_known_english_word(&lower) {
         hc_state_from_string(raw_input, HCStatusFlag::EnglishFallback, HCErrorCode::None)
@@ -1544,8 +921,11 @@ fn apply_edit_trigger_to_word(word: &str, mode: InputMode, trigger: EditTrigger)
     }
 }
 
+// ── Hán Nôm FFI (delegates to HanNomTranslator) ──
+
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[deprecated(note = "Use hc_session_handle_key_v4")]
 pub extern "C" fn hc_session_handle_key_hannom(
     session: *mut std::ffi::c_void,
     request: *const HC_KeyRequest,
@@ -1556,12 +936,24 @@ pub extern "C" fn hc_session_handle_key_hannom(
     }
     unsafe {
         let session = &mut *(session as *mut Session);
-        session.handle_han_nom_key(&*request, &mut *result)
+        let translator = session.translator.as_mut().and_then(|t| {
+            t.as_any_mut()
+                .downcast_mut::<crate::translation::HanNomTranslator>()
+        });
+        let composition = &mut session.composition;
+        match translator {
+            Some(t) => t.handle_han_nom_key(composition, &*request, &mut *result),
+            None => {
+                (*result).error_code = HCErrorCode::InvalidInputMode as i32;
+                0
+            }
+        }
     }
 }
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[deprecated(note = "Use hc_session_handle_key_v4")]
 pub extern "C" fn hc_session_handle_key_hannom_v2(
     session: *mut std::ffi::c_void,
     request: *const HC_KeyRequest,
@@ -1570,7 +962,21 @@ pub extern "C" fn hc_session_handle_key_hannom_v2(
     if session.is_null() || request.is_null() || result.is_null() {
         return 0;
     }
-    unsafe { (&mut *(session as *mut Session)).handle_han_nom_key_v2(&*request, &mut *result) }
+    unsafe {
+        let session = &mut *(session as *mut Session);
+        let translator = session.translator.as_mut().and_then(|t| {
+            t.as_any_mut()
+                .downcast_mut::<crate::translation::HanNomTranslator>()
+        });
+        let composition = &mut session.composition;
+        match translator {
+            Some(t) => t.handle_han_nom_key_v2(composition, &*request, &mut *result),
+            None => {
+                (*result).error_code = HCErrorCode::InvalidInputMode as i32;
+                0
+            }
+        }
+    }
 }
 
 #[no_mangle]
@@ -1584,7 +990,19 @@ pub extern "C" fn hc_session_select_hannom_candidate_v2(
         return 0;
     }
     unsafe {
-        (&mut *(session as *mut Session)).select_han_nom_candidate_v2(index as usize, &mut *result)
+        let session = &mut *(session as *mut Session);
+        let translator = session.translator.as_mut().and_then(|t| {
+            t.as_any_mut()
+                .downcast_mut::<crate::translation::HanNomTranslator>()
+        });
+        let composition = &mut session.composition;
+        match translator {
+            Some(t) => t.select_han_nom_candidate_v2(composition, index as usize, &mut *result),
+            None => {
+                (*result).error_code = HCErrorCode::InvalidInputMode as i32;
+                0
+            }
+        }
     }
 }
 
@@ -1598,7 +1016,10 @@ pub extern "C" fn hc_session_set_hannom_options(
         return;
     }
     unsafe {
-        (&mut *(session as *mut Session)).set_hannom_options(&*options);
+        let session = &mut *(session as *mut Session);
+        if let Some(t) = session.translator_mut() {
+            t.set_hannom_options(&*options);
+        }
     }
 }
 
@@ -1612,7 +1033,21 @@ pub extern "C" fn hc_session_handle_key_hannom_v3(
     if session.is_null() || request.is_null() || result.is_null() {
         return 0;
     }
-    unsafe { (&mut *(session as *mut Session)).handle_han_nom_key_v3(&*request, &mut *result) }
+    unsafe {
+        let session = &mut *(session as *mut Session);
+        let translator = session.translator.as_mut().and_then(|t| {
+            t.as_any_mut()
+                .downcast_mut::<crate::translation::HanNomTranslator>()
+        });
+        let composition = &mut session.composition;
+        match translator {
+            Some(t) => t.handle_han_nom_key_v3(composition, &*request, &mut *result),
+            None => {
+                (*result).error_code = HCErrorCode::InvalidInputMode as i32;
+                0
+            }
+        }
+    }
 }
 
 #[no_mangle]
@@ -1626,7 +1061,19 @@ pub extern "C" fn hc_session_select_hannom_candidate_v3(
         return 0;
     }
     unsafe {
-        (&mut *(session as *mut Session)).select_han_nom_candidate_v3(index as usize, &mut *result)
+        let session = &mut *(session as *mut Session);
+        let translator = session.translator.as_mut().and_then(|t| {
+            t.as_any_mut()
+                .downcast_mut::<crate::translation::HanNomTranslator>()
+        });
+        let composition = &mut session.composition;
+        match translator {
+            Some(t) => t.select_han_nom_candidate_v3(composition, index as usize, &mut *result),
+            None => {
+                (*result).error_code = HCErrorCode::InvalidInputMode as i32;
+                0
+            }
+        }
     }
 }
 
@@ -1640,7 +1087,10 @@ pub extern "C" fn hc_session_set_hannom_options_v2(
         return;
     }
     unsafe {
-        (&mut *(session as *mut Session)).set_hannom_options_v2(&*options);
+        let session = &mut *(session as *mut Session);
+        if let Some(t) = session.translator_mut() {
+            t.set_hannom_options_v2(&*options);
+        }
     }
 }
 
@@ -1652,7 +1102,9 @@ pub extern "C" fn hc_session_reset_hannom_learning(session: *mut std::ffi::c_voi
     }
     unsafe {
         let session = &mut *(session as *mut Session);
-        session.phrase_history.reset(&session.phrase_history_path);
+        if let Some(t) = session.translator_mut() {
+            t.reset_learning_data();
+        }
     }
 }
 
@@ -1662,7 +1114,10 @@ pub extern "C" fn hc_session_flush_hannom_learning(session: *mut std::ffi::c_voi
         return;
     }
     unsafe {
-        (&mut *(session as *mut Session)).flush_hannom_learning();
+        let session = &mut *(session as *mut Session);
+        if let Some(t) = session.translator_mut() {
+            t.flush_hannom_learning();
+        }
     }
 }
 

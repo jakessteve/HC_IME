@@ -41,6 +41,40 @@ where
         }
     }
 
+    {
+        let last_char_info = chars.last().and_then(|&last| {
+            let last_base = base_char(last);
+            if predicate(last_base) && last_base == target_lower {
+                vowel_signature(last).map(|sig| (last, sig))
+            } else {
+                None
+            }
+        });
+        if let Some((last, (family, uppercase, tone))) = last_char_info {
+            let last_idx = chars.len() - 1;
+            let strip_to_plain = match family {
+                VowelFamily::CircumflexA if predicate('a') => Some(VowelFamily::PlainA),
+                VowelFamily::CircumflexE if predicate('e') => Some(VowelFamily::PlainE),
+                VowelFamily::CircumflexO if predicate('o') => Some(VowelFamily::PlainO),
+                _ => None,
+            };
+            if let Some(plain_family) = strip_to_plain {
+                chars[last_idx] = compose_vowel(plain_family, uppercase, tone);
+                *buffer = chars.into_iter().collect();
+                return false;
+            }
+            if matches!(last, 'đ') && predicate('d') {
+                chars[last_idx] = 'd';
+                *buffer = chars.into_iter().collect();
+                return false;
+            }
+            if matches!(last, 'Đ') && predicate('d') {
+                chars[last_idx] = 'D';
+                *buffer = chars.into_iter().collect();
+                return false;
+            }
+        }
+    }
     if let Some((idx, replacement)) = chars.iter().enumerate().rev().find_map(|(idx, prev)| {
         let replacement = match vowel_signature(*prev) {
             Some((VowelFamily::PlainA, uppercase, tone)) if predicate('a') => Some(compose_vowel(
@@ -381,7 +415,7 @@ pub fn apply_circumflex_vni_toggle(buffer: &mut String) -> bool {
             if let Some(plain_family) = plain {
                 chars[idx] = compose_vowel(plain_family, uppercase, tone);
                 *buffer = chars.into_iter().collect();
-                return true;
+                return false;
             }
         }
     }
@@ -408,7 +442,7 @@ pub fn apply_horn_vni_toggle(buffer: &mut String) -> bool {
     }
     if stripped {
         *buffer = chars.into_iter().collect();
-        return true;
+        return false;
     }
     apply_horn(buffer)
 }
@@ -420,7 +454,7 @@ pub fn apply_breve_vni_toggle(buffer: &mut String) -> bool {
             if family == VowelFamily::BreveA {
                 chars[idx] = compose_vowel(VowelFamily::PlainA, uppercase, tone);
                 *buffer = chars.into_iter().collect();
-                return true;
+                return false;
             }
         }
     }
@@ -434,12 +468,12 @@ pub fn apply_d_stroke_vni_toggle(buffer: &mut String) -> bool {
             'đ' => {
                 chars[idx] = 'd';
                 *buffer = chars.into_iter().collect();
-                return true;
+                return false;
             }
             'Đ' => {
                 chars[idx] = 'D';
                 *buffer = chars.into_iter().collect();
-                return true;
+                return false;
             }
             _ => {}
         }

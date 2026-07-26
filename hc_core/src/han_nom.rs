@@ -1,4 +1,5 @@
 use crate::vowel::strip_all_marks;
+use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -327,12 +328,27 @@ pub fn get_global_dict() -> Result<Arc<EmbeddedNomDict>, DictError> {
     GLOBAL_DICT
         .get_or_init(|| {
             if let Ok(path) = std::env::var("HC_IME_NOM_DICT") {
-                if let Ok(data) = std::fs::read(&path) {
-                    if let Ok(dict) = EmbeddedNomDict::from_binary(&data) {
-                        return Ok(Arc::new(dict));
+                if let Ok(file) = File::open(&path) {
+                    if let Ok(mmap) = unsafe { Mmap::map(&file) } {
+                        if let Ok(dict) = EmbeddedNomDict::from_binary(&mmap) {
+                            eprintln!("[HC_IME] Using nom dict from file: {}", path);
+                            return Ok(Arc::new(dict));
+                        }
                     }
                 }
             }
+            for dir in crate::platform::dictionary_paths() {
+                let path = dir.join("han_nom_dict.bin");
+                if let Ok(file) = File::open(&path) {
+                    if let Ok(mmap) = unsafe { Mmap::map(&file) } {
+                        if let Ok(dict) = EmbeddedNomDict::from_binary(&mmap) {
+                            eprintln!("[HC_IME] Using nom dict from file: {}", path.display());
+                            return Ok(Arc::new(dict));
+                        }
+                    }
+                }
+            }
+            eprintln!("[HC_IME] Using embedded nom dict");
             EmbeddedNomDict::from_binary(EMBEDDED_DICT_DATA).map(Arc::new)
         })
         .clone()
@@ -340,7 +356,31 @@ pub fn get_global_dict() -> Result<Arc<EmbeddedNomDict>, DictError> {
 
 pub fn get_global_phrase_dict() -> Result<Arc<EmbeddedPhraseDict>, DictError> {
     GLOBAL_PHRASE_DICT
-        .get_or_init(|| EmbeddedPhraseDict::from_binary(EMBEDDED_PHRASE_DICT_DATA).map(Arc::new))
+        .get_or_init(|| {
+            if let Ok(path) = std::env::var("HC_IME_NOM_PHRASE_DICT") {
+                if let Ok(file) = File::open(&path) {
+                    if let Ok(mmap) = unsafe { Mmap::map(&file) } {
+                        if let Ok(dict) = EmbeddedPhraseDict::from_binary(&mmap) {
+                            eprintln!("[HC_IME] Using phrase dict from file: {}", path);
+                            return Ok(Arc::new(dict));
+                        }
+                    }
+                }
+            }
+            for dir in crate::platform::dictionary_paths() {
+                let path = dir.join("han_nom_phrase_dict.bin");
+                if let Ok(file) = File::open(&path) {
+                    if let Ok(mmap) = unsafe { Mmap::map(&file) } {
+                        if let Ok(dict) = EmbeddedPhraseDict::from_binary(&mmap) {
+                            eprintln!("[HC_IME] Using phrase dict from file: {}", path.display());
+                            return Ok(Arc::new(dict));
+                        }
+                    }
+                }
+            }
+            eprintln!("[HC_IME] Using embedded phrase dict");
+            EmbeddedPhraseDict::from_binary(EMBEDDED_PHRASE_DICT_DATA).map(Arc::new)
+        })
         .clone()
 }
 
@@ -358,13 +398,25 @@ pub struct PhraseHistory {
 }
 
 pub fn default_history_path() -> PathBuf {
-    if let Ok(value) = std::env::var("XDG_STATE_HOME") {
-        return PathBuf::from(value).join("hcime/han_nom_history.json");
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home).join(".local/state/hcime/han_nom_history.json");
-    }
-    PathBuf::from("han_nom_history.json")
+    crate::platform::state_dir()
+        .map(|p| p.join("han_nom_history.json"))
+        .unwrap_or_else(|| PathBuf::from("han_nom_history.json"))
+}
+
+static GLOBAL_PHRASE_HISTORY_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn get_global_phrase_history_path() -> PathBuf {
+    GLOBAL_PHRASE_HISTORY_PATH
+        .get_or_init(default_history_path)
+        .clone()
+}
+
+static INITIAL_PHRASE_HISTORY: OnceLock<PhraseHistory> = OnceLock::new();
+
+pub fn get_initial_phrase_history() -> PhraseHistory {
+    INITIAL_PHRASE_HISTORY
+        .get_or_init(|| PhraseHistory::load(&get_global_phrase_history_path()))
+        .clone()
 }
 
 impl PhraseHistory {
@@ -417,6 +469,10 @@ impl PhraseHistory {
                 use std::os::unix::fs::PermissionsExt;
                 fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
             }
+            #[cfg(not(unix))]
+            {
+                // Permissions are best-effort; no-op on non-Unix platforms.
+            }
         }
         let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, serde_json::to_vec(self).unwrap_or_default())?;
@@ -424,6 +480,10 @@ impl PhraseHistory {
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
+        }
+        #[cfg(not(unix))]
+        {
+            // Permissions are best-effort; no-op on non-Unix platforms.
         }
         fs::rename(tmp, path)
     }

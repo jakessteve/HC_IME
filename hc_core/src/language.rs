@@ -241,6 +241,9 @@ fn english_dictionary_paths() -> Vec<PathBuf> {
     }
     paths.push(PathBuf::from("/usr/share/dict/words"));
     paths.push(PathBuf::from("/usr/local/share/dict/words"));
+    for dir in crate::platform::dictionary_paths() {
+        paths.push(dir.join("words"));
+    }
     paths
 }
 
@@ -833,6 +836,9 @@ fn vietnamese_dictionary_paths() -> Vec<PathBuf> {
     paths.push(PathBuf::from(
         "/usr/local/share/fcitx5/bamboo/vietnamese.cm.dict",
     ));
+    for dir in crate::platform::dictionary_paths() {
+        paths.push(dir.join("vietnamese.cm.dict"));
+    }
     paths
 }
 

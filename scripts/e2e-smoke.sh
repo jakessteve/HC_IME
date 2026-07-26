@@ -29,6 +29,9 @@ cmake --build "$BUILD_DIR"
 BRIDGE_PROBE="$BUILD_DIR/hcime-bridge-probe"
 HC_CORE_RELEASE="$BUILD_DIR/linux_fcitx5/cargo-target/release"
 "${CXX:-c++}" -std=c++20 linux_fcitx5/tests/bridge_probe.cpp \
+  linux_fcitx5/src/hcime_key_handler.cpp \
+  linux_fcitx5/src/hcime_candidate_adapter.cpp \
+  linux_fcitx5/src/hcime_status_menu.cpp \
   -o "$BRIDGE_PROBE" \
   -Ilinux_fcitx5/include \
   $(pkg-config --cflags --libs Fcitx5Core Fcitx5Config Fcitx5Utils) \
@@ -55,6 +58,7 @@ grep -q '^Configurable=True$' "$DESTDIR_PATH/usr/share/fcitx5/inputmethod/hcime.
 LD_LIBRARY_PATH="$DESTDIR_PATH/usr/lib/fcitx5" ldd "$ADDON" | grep -q "$CORE"
 readelf -d "$ADDON" | grep -q 'RUNPATH.*\$ORIGIN'
 nm -D "$CORE" | grep -q 'hc_session_handle_key'
+nm -D "$CORE" | grep -q 'hc_session_handle_key_v4'
 nm -D "$CORE" | grep -q 'hc_session_handle_key_hannom_v2'
 nm -D "$CORE" | grep -q 'hc_session_handle_key_hannom_v3'
 nm -D "$CORE" | grep -q 'hc_session_select_hannom_candidate_v3'

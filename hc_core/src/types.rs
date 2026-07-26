@@ -50,9 +50,42 @@ pub struct HC_KeyRequest {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HC_KeyRequestV2 {
+    pub kind: i32,
+    pub text: *const c_char,
+    pub composition_method: i32,
+    pub translation_target: u8,
+    pub legacy_tone: u8,
+    pub spell_check: u8,
+    pub auto_restore: u8,
+    pub quick_consonants: u8,
+    pub english_protection: u8,
+    pub macro_in_english: u8,
+    pub esc_restore_raw: u8,
+}
+
+pub const TRANSLATION_TARGET_VIETNAMESE: u8 = 0;
+pub const TRANSLATION_TARGET_HAN_NOM: u8 = 1;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HC_KeyResult {
     pub state: HC_State,
     pub handled: u8,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HC_KeyResultV2 {
+    pub composition_string: *const u8,
+    pub composition_len: usize,
+    pub status_flag: i32,
+    pub error_code: i32,
+    pub spell_check_status: i32,
+    pub handled: u8,
+    pub candidates: *const HC_HanNomCandidateText,
+    pub candidate_count: u16,
+    pub total_candidate_count: u16,
 }
 
 #[repr(C)]
