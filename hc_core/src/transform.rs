@@ -447,7 +447,7 @@ pub fn apply_d_stroke_vni_toggle(buffer: &mut String) -> bool {
     apply_d_stroke(buffer)
 }
 
-fn apply_vietnamese_normalization(chars: &mut Vec<char>) {
+fn apply_vietnamese_normalization(chars: &mut [char]) {
     let bases: String = chars.iter().map(|&ch| base_char(ch)).collect();
 
     if bases.contains("uay") {
@@ -482,25 +482,10 @@ fn apply_vietnamese_normalization(chars: &mut Vec<char>) {
         }
     }
 
-    let len = chars.len();
-    if len >= 2 {
-        let last = chars[len - 1];
-        let second_last = chars[len - 2];
-        let last_is_circumflex_e =
-            vowel_signature(last).is_some_and(|(f, _, _)| matches!(f, VowelFamily::CircumflexE));
-        let second_last_base = base_char(second_last);
-
-        if last_is_circumflex_e && matches!(second_last_base, 'y' | 'i') {
-            let preceding_base = if len >= 3 {
-                base_char(chars[len - 3])
-            } else {
-                ' '
-            };
-            if preceding_base != 'u' {
-                chars.push('u');
-            }
-        }
-    }
+    // NOTE: no "iê/yê → iêu/yêu" auto-completion. "iê"/"yê" are not uniquely
+    // followed by u (viết, viên, tiết, yên, yết…), so guessing a trailing u
+    // corrupted far more words than it helped (e.g. "viê" + nặng → "việu").
+    // The u must be typed, as in every mainstream Telex IME.
 
     for i in 0..chars.len().saturating_sub(1) {
         if let Some((VowelFamily::HornU, _, _)) = vowel_signature(chars[i]) {
