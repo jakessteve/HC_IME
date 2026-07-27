@@ -41,16 +41,35 @@ where
         }
     }
 
+    // Triple-tap cancel for đ: a 3rd 'd' on an existing đ reverts it and emits
+    // the key literally (ddd → dd), mirroring the circumflex toggle (aaa → aa).
+    // đ has no vowel_signature, so it cannot use the vowel toggle below.
+    if predicate('d') {
+        if let Some(&last) = chars.last() {
+            let revert = match last {
+                'đ' => Some('d'),
+                'Đ' => Some('D'),
+                _ => None,
+            };
+            if let Some(plain) = revert {
+                let last_idx = chars.len() - 1;
+                chars[last_idx] = plain;
+                *buffer = chars.into_iter().collect();
+                return false;
+            }
+        }
+    }
+
     {
         let last_char_info = chars.last().and_then(|&last| {
             let last_base = base_char(last);
             if predicate(last_base) && last_base == target_lower {
-                vowel_signature(last).map(|sig| (last, sig))
+                vowel_signature(last)
             } else {
                 None
             }
         });
-        if let Some((last, (family, uppercase, tone))) = last_char_info {
+        if let Some((family, uppercase, tone)) = last_char_info {
             let last_idx = chars.len() - 1;
             let strip_to_plain = match family {
                 VowelFamily::CircumflexA if predicate('a') => Some(VowelFamily::PlainA),
@@ -60,16 +79,6 @@ where
             };
             if let Some(plain_family) = strip_to_plain {
                 chars[last_idx] = compose_vowel(plain_family, uppercase, tone);
-                *buffer = chars.into_iter().collect();
-                return false;
-            }
-            if matches!(last, 'đ') && predicate('d') {
-                chars[last_idx] = 'd';
-                *buffer = chars.into_iter().collect();
-                return false;
-            }
-            if matches!(last, 'Đ') && predicate('d') {
-                chars[last_idx] = 'D';
                 *buffer = chars.into_iter().collect();
                 return false;
             }

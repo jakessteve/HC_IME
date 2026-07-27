@@ -1458,6 +1458,24 @@ fn ie_ye_no_spurious_u_p2_5() {
 }
 
 #[test]
+fn dd_triple_tap_cancels_dstroke() {
+    // ddd → dd: a 3rd d reverts đ→d and emits the key literally, mirroring the
+    // circumflex toggle (aaa → aa). Was "đd" (đ-cancel branch was unreachable).
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    assert_eq!(type_raw(session, &mut req, "dd"), "đ"); // 2 taps still make đ
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "ddd"), "dd"); // 3rd tap cancels
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "DDD"), "DD"); // uppercase preserved
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "ddi"), "đi"); // normal đ word unaffected
+    hc_session_reset(session);
+    assert_eq!(type_raw(session, &mut req, "aaa"), "aa"); // vowel toggle unchanged
+    hc_session_free(session);
+}
+
+#[test]
 fn tone_edge_case_oai() {
     let session = hc_session_new(InputMode::Telex as i32, 0);
     let mut req = key_request(InputMode::Telex);
