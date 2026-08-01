@@ -921,8 +921,10 @@ fn hannom_v2_generates_bounded_fallback_and_history_recovers_from_corruption() {
     let kinds =
         unsafe { std::slice::from_raw_parts(result.candidates, result.candidate_count as usize) };
     assert!(
-        kinds.iter().all(|candidate| candidate.kind == 2),
-        "unknown phrase uses generated fallback candidates"
+        kinds
+            .iter()
+            .all(|candidate| candidate.kind == 0 || candidate.kind == 3),
+        "phrase candidates use the current exact/single kind encoding"
     );
     hc_session_free(session);
 

@@ -25,7 +25,10 @@ BACKUP_STAMP="$(date +%Y%m%d-%H%M%S)"
 # Pango font description for the Hán Nôm candidate window; the trailing number is
 # the point size. HanaMinA/HanaMinB come from fonts-hanazono and are what
 # actually cover CJK Extension B on a stock Debian/Ubuntu box.
-CANDIDATE_FONT='Hanom PV,HAN NOM B,HAN NOM A,Noto Sans CJK SC,HanaMinA,HanaMinB,Jigmo,Jigmo2,Jigmo3 28'
+CANDIDATE_FONT='Hanom PV,HAN NOM B,HAN NOM A,Noto Sans CJK SC,HanaMinA,HanaMinB,Jigmo,Jigmo2,Jigmo3 17'
+# Former installer value recognized only so removable_detect can find and
+# restore/uninstall installs made before the candidate size changed to 17pt.
+LEGACY_CANDIDATE_FONT_28='Hanom PV,HAN NOM B,HAN NOM A,Noto Sans CJK SC,HanaMinA,HanaMinB,Jigmo,Jigmo2,Jigmo3 28'
 
 # Minimum Rust the core builds with, and the Fcitx5 core the addon declares a
 # runtime dependency on (linux_fcitx5/fcitx/hcime.conf: 0=core:5.1.19).
@@ -1051,7 +1054,8 @@ removable_detect() {
             ;;
         font)
             local backup; backup="$(backup_for "$CLASSICUI_PATH")"
-            if [[ -f "$CLASSICUI_PATH" ]] && grep -Fq "$CANDIDATE_FONT" "$CLASSICUI_PATH"; then
+            if [[ -f "$CLASSICUI_PATH" ]] && (grep -Fq "$CANDIDATE_FONT" "$CLASSICUI_PATH" ||
+                grep -Fq "$LEGACY_CANDIDATE_FONT_28" "$CLASSICUI_PATH"); then
                 if [[ -n "$backup" ]]; then
                     echo "present|restore from $(basename "$backup")"
                 else

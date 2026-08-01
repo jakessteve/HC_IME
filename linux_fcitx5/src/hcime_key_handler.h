@@ -46,11 +46,42 @@ struct ContextState {
     SessionHandle session;
     bool hasActivePreedit = false;
     bool hanNomCandidatePhase = false;
-    unsigned int lastCommitTrailingChars = 0;
     bool surroundingTextEnabled = false;
+    bool surroundingTextSuppressed = false;
     PerAppMode perAppMode = PerAppMode::Global;
     SmartSwitchState smartSwitchState = SmartSwitchState::Unknown;
     std::string previousSurroundingText;
+    std::string previousSurroundingSuffix;
+    unsigned int previousSurroundingCursor = 0;
+    unsigned int previousSurroundingAnchor = 0;
+
+    void clearPreviousSurrounding() {
+        previousSurroundingText.clear();
+        previousSurroundingSuffix.clear();
+        previousSurroundingCursor = 0;
+        previousSurroundingAnchor = 0;
+    }
+
+    // Vietnamese-only short edit window.  This is deliberately bridge-internal;
+    // it is never exposed through the Rust FFI or persisted across contexts.
+    struct PendingCommit {
+        std::string committedText;
+        std::string delimiter;
+        std::string prefix;
+        std::string suffix;
+        unsigned int cursor = 0;
+        unsigned int anchor = 0;
+
+        bool active() const { return !committedText.empty() && !delimiter.empty(); }
+        void clear() {
+            committedText.clear();
+            delimiter.clear();
+            prefix.clear();
+            suffix.clear();
+            cursor = 0;
+            anchor = 0;
+        }
+    } pendingCommit;
 };
 
 struct SurroundingTextDelta {

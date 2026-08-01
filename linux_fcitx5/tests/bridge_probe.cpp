@@ -51,8 +51,10 @@ protected:
         commits.push_back(text);
         if (surroundingText().isValid()) {
             auto cur = surroundingText().text();
-            auto newPos = static_cast<unsigned int>(cur.size() + text.size());
-            surroundingText().setText(std::string(cur) + text, newPos, newPos);
+            auto newPos = surroundingText().cursor() + static_cast<unsigned int>(utf8::length(text));
+            const auto cursorByte = static_cast<size_t>(utf8::ncharByteLength(cur.begin(), surroundingText().cursor()));
+            const auto next = cur.substr(0, cursorByte) + text + cur.substr(cursorByte);
+            surroundingText().setText(next, newPos, newPos);
         }
     }
 
@@ -60,12 +62,15 @@ protected:
         surroundingDeletes.emplace_back(offset, size);
         if (surroundingText().isValid()) {
             auto cur = surroundingText().text();
-            auto curLen = static_cast<int>(cur.size());
-            int start = curLen + offset;
+            const auto cursor = static_cast<int>(surroundingText().cursor());
+            int start = cursor + offset;
             if (start < 0) start = 0;
-            auto end = start + static_cast<int>(size);
-            if (end > curLen) end = curLen;
-            auto next = std::string(cur.substr(0, start)) + std::string(cur.substr(end));
+            int end = start + static_cast<int>(size);
+            const auto charLen = static_cast<int>(utf8::length(cur));
+            if (end > charLen) end = charLen;
+            const auto startByte = static_cast<size_t>(utf8::ncharByteLength(cur.begin(), static_cast<size_t>(start)));
+            const auto endByte = static_cast<size_t>(utf8::ncharByteLength(cur.begin(), static_cast<size_t>(end)));
+            auto next = std::string(cur.substr(0, startByte)) + std::string(cur.substr(endByte));
             auto pos = static_cast<unsigned int>(start);
             surroundingText().setText(next, pos, pos);
         }
@@ -73,6 +78,16 @@ protected:
 
     void forwardKeyImpl(const ForwardKeyEvent& key) override {
         forwards.push_back(key.rawKey().sym());
+        const auto delimiter = Key::keySymToUTF8(key.rawKey().sym());
+        if (surroundingText().isValid() && delimiter.size() == 1 &&
+            hcime::HcImeKeyHandler::IsBoundaryChar(delimiter.front()) &&
+            surroundingText().cursor() == surroundingText().anchor()) {
+            auto cur = surroundingText().text();
+            auto pos = surroundingText().cursor();
+            const auto bytePos = static_cast<size_t>(utf8::ncharByteLength(cur.begin(), pos));
+            surroundingText().setText(cur.substr(0, bytePos) + delimiter + cur.substr(bytePos), pos + 1,
+                                      pos + 1);
+        }
     }
 
     void updatePreeditImpl() override {
@@ -260,16 +275,222 @@ int main() {
         require(ic.commits.size() == 1 && ic.commits.back() == "cá", "VNI spaced edit commits cá");
         require(ic.forwards.size() == 1 && ic.forwards.back() == FcitxKey_space, "VNI spaced edit forwards space");
 
-        // Reopening backspace feature is currently disabled (EDIT_TIMEOUT_MS = 0)
-        // require(send(engine, entry, ic, FcitxKey_BackSpace), "VNI spaced edit reopens committed word");
-        // require(ic.forwards.size() == 1, "VNI spaced edit consumes reopening backspace");
-        // require(ic.surroundingDeletes.size() == 1, "VNI spaced edit deletes committed word and trailing space");
-        // require(ic.surroundingDeletes.back().first == -3 && ic.surroundingDeletes.back().second == 3,
-        //         "VNI spaced edit deletes cá plus the trailing space");
-        // require(ic.inputPanel().clientPreedit().toString() == "cá", "VNI spaced edit restores cá as preedit");
+        require(send(engine, entry, ic, FcitxKey_BackSpace), "VNI spaced edit reopens committed word");
+        require(ic.forwards.size() == 1, "VNI spaced edit consumes reopening backspace");
+        require(ic.surroundingDeletes.size() == 1, "VNI spaced edit deletes committed word and trailing space");
+        require(ic.surroundingDeletes.back().first == -3 && ic.surroundingDeletes.back().second == 3,
+                "VNI spaced edit deletes cá plus the trailing space");
+        require(ic.inputPanel().clientPreedit().toString() == "cá", "VNI spaced edit restores cá as preedit");
 
-        // require(send(engine, entry, ic, FcitxKey_2), "VNI spaced edit grave accepted");
-        // require(ic.inputPanel().clientPreedit().toString() == "cà", "VNI spaced edit changes cá to cà");
+        require(send(engine, entry, ic, FcitxKey_2), "VNI spaced edit grave accepted");
+        require(ic.inputPanel().clientPreedit().toString() == "cà", "VNI spaced edit changes cá to cà");
+    }
+
+    {
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        ic.setCapabilityFlags(CapabilityFlags(CapabilityFlag::SurroundingText));
+        ic.surroundingText().setText(" ", 1, 1);
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        RawConfig config;
+        config.setValueByPath("InputMethod", "VNI");
+        config.setValueByPath("Output/OutputMode", "SurroundingText");
+        engine.setConfig(config);
+        require(send(engine, entry, ic, FcitxKey_c), "second-space setup c accepted");
+        require(send(engine, entry, ic, FcitxKey_a), "second-space setup a accepted");
+        require(send(engine, entry, ic, FcitxKey_1), "second-space setup tone accepted");
+        require(send(engine, entry, ic, FcitxKey_space), "second-space first delimiter accepted");
+        const auto deletesBeforeSecondSpace = ic.surroundingDeletes.size();
+        require(send(engine, entry, ic, FcitxKey_space), "second-space forwarded normally");
+        require(ic.surroundingDeletes.size() == deletesBeforeSecondSpace,
+                "second-space does not delete a stale committed word");
+        require(ic.forwards.size() == 2, "second-space reaches the client");
+    }
+
+    {
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        ic.setCapabilityFlags(CapabilityFlags(CapabilityFlag::SurroundingText));
+        ic.surroundingText().setText(" ", 1, 1);
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        RawConfig config;
+        config.setValueByPath("InputMethod", "VNI");
+        config.setValueByPath("Output/OutputMode", "SurroundingText");
+        engine.setConfig(config);
+        require(send(engine, entry, ic, FcitxKey_c), "mismatch setup c accepted");
+        require(send(engine, entry, ic, FcitxKey_a), "mismatch setup a accepted");
+        require(send(engine, entry, ic, FcitxKey_1), "mismatch setup tone accepted");
+        require(send(engine, entry, ic, FcitxKey_space), "mismatch setup delimiter accepted");
+        ic.surroundingText().setText("unrelated", 9, 9);
+        const auto deletesBeforeMismatch = ic.surroundingDeletes.size();
+        require(send(engine, entry, ic, FcitxKey_BackSpace), "mismatch backspace forwarded normally");
+        require(ic.surroundingDeletes.size() == deletesBeforeMismatch,
+                "mismatch does not delete unrelated surrounding text");
+    }
+
+    {
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        RawConfig config;
+        config.setValueByPath("InputMethod", "VNI");
+        engine.setConfig(config);
+        for (auto key : {FcitxKey_c, FcitxKey_a, FcitxKey_1}) {
+            require(send(engine, entry, ic, key), "no-surrounding setup key accepted");
+        }
+        require(send(engine, entry, ic, FcitxKey_space), "no-surrounding commit accepted");
+        const auto commitsBeforeDigit = ic.commits.size();
+        const auto preeditBeforeDigit = ic.inputPanel().clientPreedit().toString();
+        send(engine, entry, ic, FcitxKey_2);
+        require(ic.commits.size() == commitsBeforeDigit &&
+                    ic.inputPanel().clientPreedit().toString() == preeditBeforeDigit,
+                "no-surrounding VNI digit does not duplicate-reopen a stale commit");
+    }
+
+    {
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        RawConfig config;
+        config.setValueByPath("InputMethod", "VNI");
+        engine.setConfig(config);
+        for (auto key : {FcitxKey_t, FcitxKey_h, FcitxKey_e}) {
+            require(send(engine, entry, ic, key), "English-fallback setup key accepted");
+        }
+        require(send(engine, entry, ic, FcitxKey_space), "English-fallback commit accepted");
+        const auto commitsBeforeDigit = ic.commits.size();
+        send(engine, entry, ic, FcitxKey_6);
+        require(ic.commits.size() == commitsBeforeDigit &&
+                    ic.inputPanel().clientPreedit().toString().empty(),
+                "English fallback VNI digit does not duplicate-reopen");
+    }
+
+    {
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        ic.setCapabilityFlags(CapabilityFlags(CapabilityFlag::SurroundingText));
+        ic.surroundingText().setText("前", 1, 1);
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        RawConfig config;
+        config.setValueByPath("InputMethod", "VNI");
+        config.setValueByPath("Output/OutputMode", "SurroundingText");
+        engine.setConfig(config);
+        for (auto key : {FcitxKey_c, FcitxKey_a, FcitxKey_1}) {
+            require(send(engine, entry, ic, key), "Unicode-prefix setup key accepted");
+        }
+        require(send(engine, entry, ic, FcitxKey_space), "Unicode-prefix commit accepted");
+        require(send(engine, entry, ic, FcitxKey_BackSpace), "Unicode-prefix backspace reopened");
+        require(ic.surroundingDeletes.back().first == -3 && ic.surroundingDeletes.back().second == 3,
+                "Unicode-prefix deletion uses character offsets");
+    }
+
+    {
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        ic.setCapabilityFlags(CapabilityFlags(CapabilityFlag::SurroundingText));
+        ic.surroundingText().setText("", 0, 0);
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        RawConfig config;
+        config.setValueByPath("InputMethod", "VNI");
+        config.setValueByPath("Output/OutputMode", "SurroundingText");
+        engine.setConfig(config);
+        for (auto key : {FcitxKey_c, FcitxKey_a, FcitxKey_1}) {
+            require(send(engine, entry, ic, key), "empty-document setup key accepted");
+        }
+        require(send(engine, entry, ic, FcitxKey_space), "empty-document commit accepted");
+        require(send(engine, entry, ic, FcitxKey_BackSpace), "empty-document backspace reopened");
+        require(!ic.surroundingDeletes.empty() && ic.surroundingDeletes.back().second == 3,
+                "empty-document reopen uses bounded character offsets");
+    }
+
+    {
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        ic.setCapabilityFlags(CapabilityFlags(CapabilityFlag::SurroundingText));
+        ic.surroundingText().setText("left right", 4, 4);
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        RawConfig config;
+        config.setValueByPath("InputMethod", "VNI");
+        config.setValueByPath("Output/OutputMode", "SurroundingText");
+        engine.setConfig(config);
+        for (auto key : {FcitxKey_c, FcitxKey_a, FcitxKey_1}) {
+            require(send(engine, entry, ic, key), "cursor-middle setup key accepted");
+        }
+        require(send(engine, entry, ic, FcitxKey_space), "cursor-middle commit accepted");
+        require(ic.surroundingText().text() == "leftcá  right",
+                "cursor-middle commit preserves the Unicode suffix identity");
+        ic.surroundingText().setCursor(ic.surroundingText().cursor(), ic.surroundingText().cursor() - 1);
+        const auto deletesBeforeSelection = ic.surroundingDeletes.size();
+        require(send(engine, entry, ic, FcitxKey_BackSpace), "selection drift backspace forwarded");
+        require(ic.surroundingDeletes.size() == deletesBeforeSelection,
+                "selection drift never deletes surrounding text");
+    }
+
+    {
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        ic.setCapabilityFlags(CapabilityFlags(CapabilityFlag::SurroundingText));
+        ic.surroundingText().setText("prefix suffix", 6, 6);
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        RawConfig config;
+        config.setValueByPath("InputMethod", "VNI");
+        config.setValueByPath("Output/OutputMode", "SurroundingText");
+        engine.setConfig(config);
+        require(send(engine, entry, ic, FcitxKey_c), "active-drift first key accepted");
+        const auto deletesBeforeDrift = ic.surroundingDeletes.size();
+        ic.surroundingText().setCursor(5, 5);
+        require(send(engine, entry, ic, FcitxKey_a), "active-drift fallback key accepted");
+        require(ic.inputPanel().clientPreedit().toString() == "ca" &&
+                    ic.surroundingDeletes.size() == deletesBeforeDrift,
+                "active drift falls back to visible preedit without deletion");
+        require(send(engine, entry, ic, FcitxKey_1), "active-drift second key accepted");
+        require(ic.inputPanel().clientPreedit().toString() == "cá" &&
+                    ic.surroundingDeletes.size() == deletesBeforeDrift,
+                "suppressed surrounding mode remains visible on the next key");
+    }
+
+    {
+        InputContextManager manager;
+        MockInputContext ic(manager);
+        ic.setCapabilityFlags(CapabilityFlags(CapabilityFlag::SurroundingText));
+        ic.surroundingText().setText(" ", 1, 1);
+        hcime::HcImeEngine engine(nullptr);
+        const auto entries = engine.listInputMethods();
+        const auto& entry = entries.front();
+        RawConfig config;
+        config.setValueByPath("InputMethod", "VNI");
+        config.setValueByPath("Output/OutputMode", "SurroundingText");
+        engine.setConfig(config);
+
+        for (auto key : {FcitxKey_k, FcitxKey_h, FcitxKey_o, FcitxKey_n, FcitxKey_g}) {
+            require(send(engine, entry, ic, key), "VNI direct-edit word key accepted");
+        }
+        require(send(engine, entry, ic, FcitxKey_space), "VNI direct-edit commit accepted");
+        const auto deletesBeforeDigit = ic.surroundingDeletes.size();
+        require(send(engine, entry, ic, FcitxKey_6), "VNI direct-edit digit accepted");
+        require(ic.surroundingDeletes.size() == deletesBeforeDigit + 1,
+                "VNI direct-edit deletes the committed word and delimiter");
+        require(ic.surroundingDeletes.back().first == -6 && ic.surroundingDeletes.back().second == 6,
+                "VNI direct-edit deletion covers khong plus delimiter");
+        require(ic.inputPanel().clientPreedit().toString().empty() &&
+                    ic.surroundingText().text() == " không",
+                "VNI direct-edit reopens with reconversion preedit");
     }
 
     {

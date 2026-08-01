@@ -98,6 +98,13 @@ FCITX_CONFIGURATION(
 
 namespace {
 
+struct SurroundingSnapshot {
+    bool valid = false;
+    std::string text;
+    unsigned int cursor = 0;
+    unsigned int anchor = 0;
+};
+
 static void SetEnvIfNotEmpty(const char* name, const std::string& value) {
     if (!value.empty()) {
         setenv(name, value.c_str(), 1);
@@ -284,6 +291,7 @@ public:
                     if (useSurroundingText) {
                         HcImeCandidateAdapter::commitViaSurroundingText(event.inputContext(), state, "");
                         state.surroundingTextEnabled = false;
+                        state.surroundingTextSuppressed = false;
                     }
                     state.hasActivePreedit = false;
                     HcImeCandidateAdapter::clearPreedit(event.inputContext());
@@ -317,6 +325,19 @@ public:
             toEnglishProtectionLevel(*config_.behavior->englishProtection),
             static_cast<uint8_t>(*config_.behavior->macroInEnglish),
             static_cast<uint8_t>(*config_.behavior->escRestoreRaw));
+
+        const bool armCandidate = !HcImeKeyHandler::isHanNomInputMode(mode) &&
+            (requestV2.kind == HC_KEY_SPACE || requestV2.kind == HC_KEY_BOUNDARY);
+        SurroundingSnapshot preCommitSnapshot;
+        std::string preCommitPreedit;
+        if (armCandidate && event.inputContext()->surroundingText().isValid()) {
+            const auto& surrounding = event.inputContext()->surroundingText();
+            preCommitSnapshot.valid = surrounding.cursor() == surrounding.anchor();
+            preCommitSnapshot.text = surrounding.text();
+            preCommitSnapshot.cursor = surrounding.cursor();
+            preCommitSnapshot.anchor = surrounding.anchor();
+            preCommitPreedit = state.previousSurroundingText;
+        }
 
         if (state.session.ptr == nullptr) {
             state.session.ptr = hc_session_new(mode, 0);
@@ -383,6 +404,40 @@ public:
             }
         }
 
+        const bool directVniDigit = mode == HC_INPUT_VNI && input.size() == 1 &&
+            input.front() >= '0' && input.front() <= '9' &&
+            requestV2.kind == HC_KEY_PRINTABLE && !state.hasActivePreedit;
+
+        // A pending edit is consumed only by the Vietnamese backspace/VNI paths.
+        // Any other key invalidates it before normal client handling continues.
+        if (!HcImeKeyHandler::isHanNomInputMode(mode) && directVniDigit) {
+            if (!state.pendingCommit.active()) {
+                // Never let a plain VNI digit consult an untracked Rust last-commit.
+                invalidatePendingCommit(state);
+            } else if (!validatePendingCommit(event.inputContext(), state)) {
+                invalidatePendingCommit(state);
+                event.inputContext()->forwardKey(event.rawKey(), event.isRelease(), event.time());
+                event.filterAndAccept();
+                return;
+            }
+        } else if (!HcImeKeyHandler::isHanNomInputMode(mode) && state.pendingCommit.active() &&
+                   !state.hasActivePreedit) {
+            if (HcImeKeyHandler::isBackspaceKey(event.key())) {
+                if (tryReconvertLastCommitFromBackspace(event, state, mode, useSurroundingText)) {
+                    return;
+                }
+                resetAndForwardKey(event, state);
+                return;
+            } else {
+                invalidatePendingCommit(state);
+                if (requestV2.kind == HC_KEY_SPACE || requestV2.kind == HC_KEY_BOUNDARY ||
+                    requestV2.kind == HC_KEY_ENTER || HcImeKeyHandler::isEditingPassthroughKey(event.key())) {
+                    resetAndForwardKey(event, state);
+                    return;
+                }
+            }
+        }
+
         if (HcImeKeyHandler::isEditingPassthroughKey(event.key())) {
             if (state.hasActivePreedit) {
                 commitAndForwardKey(event, state, mode);
@@ -413,10 +468,22 @@ public:
             return;
         }
 
+        const bool pendingVniReopen = mode == HC_INPUT_VNI && state.pendingCommit.active() &&
+            input.size() == 1 && input.front() >= '0' && input.front() <= '9' &&
+            requestV2.kind == HC_KEY_PRINTABLE && validatePendingCommit(event.inputContext(), state);
+        const auto pendingVniSnapshot = state.pendingCommit;
+
         HC_KeyResultV2 keyResult;
         std::memset(&keyResult, 0, sizeof(keyResult));
         int32_t handled = hc_session_handle_key_v4(state.session.ptr, &requestV2, &keyResult);
-        if (handled == 0) return;
+        if (handled == 0) {
+            if (pendingVniReopen) {
+                invalidatePendingCommit(state);
+                event.inputContext()->forwardKey(event.rawKey(), event.isRelease(), event.time());
+                event.filterAndAccept();
+            }
+            return;
+        }
 
         if (HcImeKeyHandler::isHanNomInputMode(mode)) {
             HC_HanNomResultV3 nomResult;
@@ -453,12 +520,19 @@ public:
         }
 
         if (keyResult.error_code < 0) {
+            if (pendingVniReopen) {
+                invalidatePendingCommit(state);
+                event.inputContext()->forwardKey(event.rawKey(), event.isRelease(), event.time());
+                event.filterAndAccept();
+                return;
+            }
             event.filterAndAccept();
             state.hasActivePreedit = false;
             state.hanNomCandidatePhase = false;
-            state.lastCommitTrailingChars = 0;
-            state.previousSurroundingText.clear();
+            state.pendingCommit.clear();
+            state.clearPreviousSurrounding();
             state.surroundingTextEnabled = false;
+            state.surroundingTextSuppressed = false;
             HcImeCandidateAdapter::clearPreedit(event.inputContext());
             return;
         }
@@ -468,21 +542,37 @@ public:
             output.assign(keyResult.composition_string, keyResult.composition_len);
         }
 
+        if (pendingVniReopen && (keyResult.status_flag != HC_STATUS_RECONVERSION_ACTIVE ||
+                                 output.empty() || !utf8::validate(output))) {
+            invalidatePendingCommit(state);
+            event.inputContext()->forwardKey(event.rawKey(), event.isRelease(), event.time());
+            event.filterAndAccept();
+            return;
+        }
+
         if (keyResult.status_flag == HC_STATUS_ESC_RESTORED_RAW) {
             HcImeCandidateAdapter::clearPreedit(event.inputContext());
             event.inputContext()->commitString(output);
             state.hasActivePreedit = false;
             state.hanNomCandidatePhase = false;
-            state.previousSurroundingText.clear();
+            state.clearPreviousSurrounding();
             state.surroundingTextEnabled = false;
+            state.surroundingTextSuppressed = false;
             event.filterAndAccept();
             return;
         }
 
+        bool surroundingCommitValid = true;
         switch (keyResult.status_flag) {
             case HC_STATUS_IN_PROGRESS:
             case HC_STATUS_RECONVERSION_ACTIVE:
-                state.lastCommitTrailingChars = 0;
+                if (pendingVniReopen) {
+                    const auto deleteChars = static_cast<unsigned int>(utf8::length(pendingVniSnapshot.committedText) +
+                                                                         utf8::length(pendingVniSnapshot.delimiter));
+                    event.inputContext()->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
+                    state.clearPreviousSurrounding();
+                }
+                state.pendingCommit.clear();
                 state.hasActivePreedit = !output.empty();
                 if (output.empty()) {
                     HcImeCandidateAdapter::clearPreedit(event.inputContext());
@@ -499,7 +589,8 @@ public:
             case HC_STATUS_COMMIT:
             case HC_STATUS_ENGLISH_FALLBACK:
                 if (useSurroundingText) {
-                    HcImeCandidateAdapter::commitViaSurroundingText(event.inputContext(), state, output);
+                    surroundingCommitValid = HcImeCandidateAdapter::commitViaSurroundingText(
+                        event.inputContext(), state, output);
                 } else {
                     HcImeCandidateAdapter::clearPreedit(event.inputContext());
                     event.inputContext()->commitString(output);
@@ -507,11 +598,19 @@ public:
                 updateSmartSwitch(state, appName, keyResult.status_flag);
                 state.hasActivePreedit = false;
                 state.hanNomCandidatePhase = false;
-                state.lastCommitTrailingChars = 0;
-                state.previousSurroundingText.clear();
+                state.pendingCommit.clear();
+                state.clearPreviousSurrounding();
                 state.surroundingTextEnabled = false;
-                if (requestV2.kind == HC_KEY_SPACE || requestV2.kind == HC_KEY_BOUNDARY) {
-                    state.lastCommitTrailingChars = output.empty() ? 0 : 1;
+                state.surroundingTextSuppressed = false;
+                if (!HcImeKeyHandler::isHanNomInputMode(mode) &&
+                    (requestV2.kind == HC_KEY_SPACE || requestV2.kind == HC_KEY_BOUNDARY)) {
+                    if (!surroundingCommitValid ||
+                        !armPendingCommit(event.inputContext(), state, output, input,
+                                          preCommitSnapshot, preCommitPreedit)) {
+                        // A plain Vietnamese commit without a validated surrounding
+                        // snapshot must not leave Rust's last-commit cache reopenable.
+                        invalidatePendingCommit(state);
+                    }
                     event.inputContext()->forwardKey(event.rawKey(), event.isRelease(), event.time());
                 } else if (requestV2.kind == HC_KEY_ENTER) {
                     event.inputContext()->forwardKey(event.rawKey(), event.isRelease(), event.time());
@@ -522,9 +621,10 @@ public:
                 event.filterAndAccept();
                 state.hasActivePreedit = false;
                 state.hanNomCandidatePhase = false;
-                state.lastCommitTrailingChars = 0;
-                state.previousSurroundingText.clear();
+                state.pendingCommit.clear();
+                state.clearPreviousSurrounding();
                 state.surroundingTextEnabled = false;
+                state.surroundingTextSuppressed = false;
                 HcImeCandidateAdapter::clearPreedit(event.inputContext());
                 return;
         }
@@ -554,9 +654,10 @@ public:
         }
         state.hasActivePreedit = false;
         state.hanNomCandidatePhase = false;
-        state.lastCommitTrailingChars = 0;
-        state.previousSurroundingText.clear();
+        state.pendingCommit.clear();
+        state.clearPreviousSurrounding();
         state.surroundingTextEnabled = false;
+        state.surroundingTextSuppressed = false;
         HcImeCandidateAdapter::clearPreedit(event.inputContext());
         event.inputContext()->statusArea().clearGroup(StatusGroup::InputMethod);
         event.inputContext()->updateUserInterface(UserInterfaceComponent::StatusArea, true);
@@ -576,9 +677,10 @@ public:
         }
         state.hasActivePreedit = false;
         state.hanNomCandidatePhase = false;
-        state.lastCommitTrailingChars = 0;
-        state.previousSurroundingText.clear();
+        state.pendingCommit.clear();
+        state.clearPreviousSurrounding();
         state.surroundingTextEnabled = false;
+        state.surroundingTextSuppressed = false;
         HcImeCandidateAdapter::clearPreedit(event.inputContext());
     }
 
@@ -611,6 +713,7 @@ private:
     }
 
     bool shouldUseSurroundingText(InputContext* ic, ContextState& state) {
+        if (state.surroundingTextSuppressed) return false;
         auto appName = getAppName(ic);
         if (isAppInList(appName, *config_.perApp->preeditApps)) {
             return false;
@@ -656,9 +759,10 @@ private:
             }
             state.hasActivePreedit = false;
             state.hanNomCandidatePhase = false;
-            state.lastCommitTrailingChars = 0;
-            state.previousSurroundingText.clear();
+            state.pendingCommit.clear();
+            state.clearPreviousSurrounding();
             state.surroundingTextEnabled = false;
+            state.surroundingTextSuppressed = false;
         }
     }
 
@@ -672,9 +776,10 @@ private:
         if (state.session.ptr != nullptr) hc_session_reset(state.session.ptr);
         state.hasActivePreedit = false;
         state.hanNomCandidatePhase = false;
-        state.lastCommitTrailingChars = 0;
-        state.previousSurroundingText.clear();
+        state.pendingCommit.clear();
+        state.clearPreviousSurrounding();
         state.surroundingTextEnabled = false;
+        state.surroundingTextSuppressed = false;
         HcImeCandidateAdapter::clearPreedit(event.inputContext());
     }
 
@@ -698,17 +803,72 @@ private:
         }
         state.hasActivePreedit = false;
         state.hanNomCandidatePhase = false;
-        state.lastCommitTrailingChars = 0;
-        state.previousSurroundingText.clear();
+        state.pendingCommit.clear();
+        state.clearPreviousSurrounding();
         state.surroundingTextEnabled = false;
+        state.surroundingTextSuppressed = false;
+    }
+
+    void invalidatePendingCommit(ContextState& state) {
+        state.pendingCommit.clear();
+        if (state.session.ptr != nullptr) {
+            hc_session_reset(state.session.ptr);
+        }
+    }
+
+    bool validatePendingCommit(InputContext* ic, const ContextState& state) const {
+        if (ic == nullptr || !state.pendingCommit.active()) return false;
+        const auto& surrounding = ic->surroundingText();
+        if (!surrounding.isValid() || surrounding.cursor() != surrounding.anchor() ||
+            surrounding.cursor() != state.pendingCommit.cursor ||
+            surrounding.anchor() != state.pendingCommit.anchor) {
+            return false;
+        }
+        const auto& text = surrounding.text();
+        const auto expected = state.pendingCommit.prefix + state.pendingCommit.committedText +
+            state.pendingCommit.delimiter + state.pendingCommit.suffix;
+        return text == expected;
+    }
+
+    bool armPendingCommit(InputContext* ic, ContextState& state, const std::string& committedText,
+                          const std::string& delimiter, const SurroundingSnapshot& snapshot,
+                          const std::string& preedit) {
+        state.pendingCommit.clear();
+        if (ic == nullptr || committedText.empty() || delimiter.empty() || !snapshot.valid ||
+            !utf8::validate(snapshot.text) || !utf8::validate(committedText) ||
+            !utf8::validate(delimiter) || snapshot.cursor != snapshot.anchor) return false;
+        const auto committedChars = static_cast<unsigned int>(utf8::length(committedText));
+        const auto delimiterChars = static_cast<unsigned int>(utf8::length(delimiter));
+        const auto preeditChars = static_cast<unsigned int>(utf8::length(preedit));
+        const auto cursor = snapshot.cursor;
+        const auto textChars = static_cast<unsigned int>(utf8::length(snapshot.text));
+        if (cursor > textChars || cursor < preeditChars) return false;
+        const auto start = static_cast<size_t>(cursor - preeditChars);
+        const auto startByte = start == 0
+            ? size_t{0}
+            : static_cast<size_t>(utf8::ncharByteLength(snapshot.text.begin(), start));
+        if (startByte + preedit.size() > snapshot.text.size() ||
+            snapshot.text.compare(startByte, preedit.size(), preedit) != 0) return false;
+        const auto cursorByte = cursor == 0
+            ? size_t{0}
+            : static_cast<size_t>(utf8::ncharByteLength(snapshot.text.begin(), cursor));
+        state.pendingCommit.committedText = committedText;
+        state.pendingCommit.delimiter = delimiter;
+        state.pendingCommit.prefix = snapshot.text.substr(0, startByte);
+        state.pendingCommit.suffix = snapshot.text.substr(cursorByte);
+        state.pendingCommit.cursor = static_cast<unsigned int>(utf8::length(state.pendingCommit.prefix)) +
+            committedChars + delimiterChars;
+        state.pendingCommit.anchor = state.pendingCommit.cursor;
+        return true;
     }
 
     bool tryReconvertLastCommitFromBackspace(KeyEvent& event, ContextState& state, int32_t mode, bool useSurroundingText) {
-        if (state.session.ptr == nullptr || state.lastCommitTrailingChars == 0) return false;
-        const bool canDeleteSurrounding = useSurroundingText ||
-            (event.inputContext()->capabilityFlags().test(CapabilityFlag::SurroundingText) &&
-             (event.inputContext()->surroundingText().isValid() || state.lastCommitTrailingChars > 0));
-        if (!canDeleteSurrounding) return false;
+        if (state.session.ptr == nullptr || !state.pendingCommit.active() ||
+            HcImeKeyHandler::isHanNomInputMode(mode) ||
+            !validatePendingCommit(event.inputContext(), state)) {
+            invalidatePendingCommit(state);
+            return false;
+        }
         HC_KeyRequest request{HcImeKeyHandler::makeKeyRequest(
             HC_KEY_BACKSPACE, nullptr, mode,
             static_cast<uint8_t>(*config_.input->legacyTone),
@@ -720,13 +880,16 @@ private:
             static_cast<uint8_t>(*config_.behavior->escRestoreRaw))};
         const Utf8KeyResult result = HcImeKeyHandler::handleKeyUtf8(state.session.ptr, &request);
         if (result.handled == 0 || result.errorCode < 0 ||
-            result.statusFlag != HC_STATUS_RECONVERSION_ACTIVE || result.text.empty()) {
+            result.statusFlag != HC_STATUS_RECONVERSION_ACTIVE || result.text.empty() ||
+            !utf8::validate(result.text) || result.text != state.pendingCommit.committedText) {
+            invalidatePendingCommit(state);
             return false;
         }
         const auto committedChars = static_cast<unsigned int>(utf8::length(result.text));
-        const auto deleteChars = committedChars + state.lastCommitTrailingChars;
+        const auto delimiterChars = static_cast<unsigned int>(utf8::length(state.pendingCommit.delimiter));
+        const auto deleteChars = committedChars + delimiterChars;
         event.inputContext()->deleteSurroundingText(-static_cast<int>(deleteChars), deleteChars);
-        state.lastCommitTrailingChars = 0;
+        state.pendingCommit.clear();
         state.hasActivePreedit = true;
         state.hanNomCandidatePhase = false;
         if (useSurroundingText) {

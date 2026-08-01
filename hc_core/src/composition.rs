@@ -19,7 +19,7 @@ pub(crate) fn get_global_macros() -> Arc<RwLock<HashMap<String, String>>> {
         .clone()
 }
 
-pub const EDIT_TIMEOUT_MS: u128 = 0;
+pub const EDIT_TIMEOUT_MS: u128 = 2_000;
 
 #[derive(Debug, Clone)]
 pub struct CompositionEngine {
@@ -261,7 +261,6 @@ impl CompositionEngine {
         self.macros.write().unwrap().clear();
     }
 
-    #[allow(clippy::absurd_extreme_comparisons)]
     pub fn can_edit_last_commit(&self) -> bool {
         if self.last_commit.is_empty() {
             return false;
@@ -270,6 +269,12 @@ impl CompositionEngine {
             Some(t) => t.elapsed().as_millis() < EDIT_TIMEOUT_MS,
             None => false,
         }
+    }
+
+    pub fn clear_last_commit(&mut self) {
+        self.last_commit.clear();
+        self.last_raw.clear();
+        self.last_commit_time = None;
     }
 
     pub fn save_state_for_undo(&mut self) {

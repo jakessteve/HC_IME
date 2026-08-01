@@ -185,7 +185,7 @@ $FC.GetConfig "fcitx://config/addon/hcime"
 # Partial writes merge: keys you do not mention keep their values.
 $FC.SetConfig "fcitx://config/addon/hcime" "<{'Input': <{'InputMethod': <'VNI'>}>}>"
 $FC.SetConfig "fcitx://config/addon/hcime" "<{'Output': <{'OutputMode': <'SurroundingText'>}>}>"
-$FC.SetConfig "fcitx://config/addon/classicui" "<{'Font': <'Hanom PV,Noto Sans CJK SC 28'>}>"
+$FC.SetConfig "fcitx://config/addon/classicui" "<{'Font': <'Hanom PV,Noto Sans CJK SC 17'>}>"
 ```
 
 Accepted values:

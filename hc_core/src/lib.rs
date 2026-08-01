@@ -1,6 +1,8 @@
 use std::cell::RefCell;
 use std::ffi::{c_char, CStr};
 use std::ptr;
+#[cfg(test)]
+use std::time::{Duration, Instant};
 
 pub mod compose;
 pub mod composition;
@@ -28,6 +30,21 @@ use language::is_known_english_word;
 use transform::{apply_circumflex, apply_telex_w, apply_tone_to_word};
 
 use vowel::strip_all_marks;
+
+#[cfg(test)]
+pub(crate) fn hc_session_test_set_last_commit_age(session: *mut std::ffi::c_void, age_ms: u64) {
+    if session.is_null() {
+        return;
+    }
+    unsafe {
+        let session = &mut *(session as *mut Session);
+        session.composition.last_commit_time = Some(
+            Instant::now()
+                .checked_sub(Duration::from_millis(age_ms))
+                .unwrap_or_else(Instant::now),
+        );
+    }
+}
 
 thread_local! {
     static UTF8_RESULT_BUFFER: RefCell<String> = const { RefCell::new(String::new()) };
@@ -138,6 +155,10 @@ impl Session {
                         };
                     }
 
+                    // Expired reconversion state must not linger after a rejected
+                    // backspace; the client receives its normal key handling.
+                    self.composition.clear_last_commit();
+
                     return HC_KeyResult {
                         state: hc_error_state(HCErrorCode::None),
                         handled: 0,
@@ -202,6 +223,7 @@ impl Session {
                             )
                         }
                     };
+                    let mut auto_reopened = false;
                     if self.composition.mode == InputMode::Vni
                         && single_char
                         && first_char.is_ascii_digit()
@@ -215,6 +237,8 @@ impl Session {
                         } else {
                             self.composition.last_raw.clone()
                         };
+                        self.composition.reconversion_active = true;
+                        auto_reopened = true;
                     }
 
                     self.composition.last_commit.clear();
@@ -260,6 +284,9 @@ impl Session {
 
                     self.composition.raw_buffer.push_str(text);
                     self.composition.render_from_raw();
+                    if auto_reopened {
+                        self.composition.reconversion_active = true;
+                    }
                     return self.composition.emit_preedit(true);
                 }
                 HCKeyKind::Undo => {

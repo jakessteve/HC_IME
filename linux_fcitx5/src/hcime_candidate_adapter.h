@@ -46,7 +46,7 @@ public:
     static void applySurroundingTextPreedit(fcitx::InputContext* ic, ContextState& state,
                                             const std::string& newPreedit);
 
-    static void commitViaSurroundingText(fcitx::InputContext* ic, ContextState& state,
+    static bool commitViaSurroundingText(fcitx::InputContext* ic, ContextState& state,
                                          const std::string& committedText);
 
     static void setPreedit(fcitx::InputContext* ic, const std::string& text,

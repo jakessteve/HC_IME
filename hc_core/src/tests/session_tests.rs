@@ -1,7 +1,6 @@
 use crate::test_helpers::*;
 use crate::*;
 use std::ptr;
-use std::time::Duration;
 
 #[test]
 fn live_session_uses_requested_input_mode() {
@@ -16,7 +15,6 @@ fn live_session_uses_requested_input_mode() {
 }
 
 #[test]
-#[ignore] // disabled: EDIT_TIMEOUT_MS=0
 fn vni_spaced_commit_can_be_reopened_for_tone_change_within_timeout() {
     let session = hc_session_new(InputMode::Vni as i32, 0);
     let mut req = key_request(InputMode::Vni);
@@ -46,7 +44,6 @@ fn vni_spaced_commit_can_be_reopened_for_tone_change_within_timeout() {
 }
 
 #[test]
-#[ignore] // disabled: EDIT_TIMEOUT_MS=0
 fn spaced_commit_edit_window_expires() {
     let session = hc_session_new(InputMode::Vni as i32, 0);
     let mut req = key_request(InputMode::Vni);
@@ -56,7 +53,7 @@ fn spaced_commit_edit_window_expires() {
     assert_eq!(committed, "cá");
     assert_eq!(status, HCStatusFlag::Commit as i32);
 
-    std::thread::sleep(Duration::from_millis(1600));
+    hc_session_test_set_last_commit_age(session, 2_001);
 
     req.kind = HCKeyKind::Backspace as i32;
     req.text = ptr::null();
@@ -68,7 +65,6 @@ fn spaced_commit_edit_window_expires() {
 }
 
 #[test]
-#[ignore] // disabled: EDIT_TIMEOUT_MS=0
 fn reconversion_preserves_mixed_case() {
     let session = hc_session_new(InputMode::Telex as i32, 0);
     let mut req = key_request(InputMode::Telex);
@@ -121,7 +117,6 @@ fn undo_reverts_last_transformation() {
 }
 
 #[test]
-#[ignore] // disabled: EDIT_TIMEOUT_MS=0
 fn vni_digit_after_space_auto_reopens_commit_within_timeout() {
     let session = hc_session_new(InputMode::Vni as i32, 0);
     let mut req = key_request(InputMode::Vni);
@@ -138,14 +133,16 @@ fn vni_digit_after_space_auto_reopens_commit_within_timeout() {
     let six = c("6");
     req.text = six.as_ptr();
     let edit = hc_session_handle_key(session, &req);
-    assert_eq!(edit.state.status_flag, HCStatusFlag::InProgress as i32);
+    assert_eq!(
+        edit.state.status_flag,
+        HCStatusFlag::ReconversionActive as i32
+    );
     assert_eq!(read_and_free(edit.state), "không");
 
     hc_session_free(session);
 }
 
 #[test]
-#[ignore] // disabled: EDIT_TIMEOUT_MS=0
 fn vni_digit_after_space_does_not_reopen_after_timeout() {
     let session = hc_session_new(InputMode::Vni as i32, 0);
     let mut req = key_request(InputMode::Vni);
@@ -156,8 +153,7 @@ fn vni_digit_after_space_does_not_reopen_after_timeout() {
     assert_eq!(committed, "khong");
     assert_eq!(status, HCStatusFlag::Commit as i32);
 
-    // Wait for edit window to expire
-    std::thread::sleep(Duration::from_millis(1600));
+    hc_session_test_set_last_commit_age(session, 2_001);
 
     // Type "6" - should NOT reopen, should be unhandled
     req.kind = HCKeyKind::Printable as i32;
@@ -196,7 +192,6 @@ fn vni_tone_digit_does_not_reopen_toned_word() {
 }
 
 #[test]
-#[ignore] // disabled: EDIT_TIMEOUT_MS=0
 fn vni_tone_digit_reopens_untone_word() {
     let session = hc_session_new(InputMode::Vni as i32, 0);
     let mut req = key_request(InputMode::Vni);
@@ -212,7 +207,10 @@ fn vni_tone_digit_reopens_untone_word() {
     let one = c("1");
     req.text = one.as_ptr();
     let edit = hc_session_handle_key(session, &req);
-    assert_eq!(edit.state.status_flag, HCStatusFlag::InProgress as i32);
+    assert_eq!(
+        edit.state.status_flag,
+        HCStatusFlag::ReconversionActive as i32
+    );
     assert_eq!(read_and_free(edit.state), "khóng");
 
     hc_session_free(session);
@@ -246,7 +244,6 @@ fn mode_cycling_100_times_is_safe() {
 }
 
 #[test]
-#[ignore] // disabled: EDIT_TIMEOUT_MS=0
 fn session_backspace_rehydrates_after_commit() {
     let session = hc_session_new(InputMode::Telex as i32, 0);
     let h = c("h");
