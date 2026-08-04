@@ -25,7 +25,7 @@ pub use types::*;
 
 use session::Session;
 
-use composition::{get_global_macros, vni_digit_transforms_buffer};
+use composition::get_global_macros;
 use language::is_known_english_word;
 use transform::{apply_circumflex, apply_telex_w, apply_tone_to_word};
 
@@ -205,42 +205,6 @@ impl Session {
                     };
                     let single_char = chars.next().is_none();
 
-                    // Auto-reopen last commit for VNI digit transformation within edit window.
-                    // For tone digits (1-5), only reopen when the committed word has no tone,
-                    // so that standalone numbers after a toned word pass through as literals.
-                    // For diacritic digits (6-9) and 0, use the normal transform check.
-                    let auto_reopen_allowed = self.composition.can_edit_last_commit() && {
-                        if ('1'..='5').contains(&first_char) {
-                            !self.composition.last_commit.chars().any(|ch| {
-                                crate::vowel::vowel_signature(ch)
-                                    .is_some_and(|(_, _, t)| t != crate::types::Tone::Flat)
-                            })
-                        } else {
-                            vni_digit_transforms_buffer(
-                                &self.composition.last_commit,
-                                first_char,
-                                self.composition.legacy_tone,
-                            )
-                        }
-                    };
-                    let mut auto_reopened = false;
-                    if self.composition.mode == InputMode::Vni
-                        && single_char
-                        && first_char.is_ascii_digit()
-                        && self.composition.buffer.is_empty()
-                        && self.composition.raw_buffer.is_empty()
-                        && auto_reopen_allowed
-                    {
-                        self.composition.buffer = self.composition.last_commit.clone();
-                        self.composition.raw_buffer = if self.composition.last_raw.is_empty() {
-                            strip_all_marks(&self.composition.buffer)
-                        } else {
-                            self.composition.last_raw.clone()
-                        };
-                        self.composition.reconversion_active = true;
-                        auto_reopened = true;
-                    }
-
                     self.composition.last_commit.clear();
                     self.composition.last_raw.clear();
                     self.composition.last_commit_time = None;
@@ -284,9 +248,6 @@ impl Session {
 
                     self.composition.raw_buffer.push_str(text);
                     self.composition.render_from_raw();
-                    if auto_reopened {
-                        self.composition.reconversion_active = true;
-                    }
                     return self.composition.emit_preedit(true);
                 }
                 HCKeyKind::Undo => {

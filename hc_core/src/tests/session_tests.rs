@@ -117,7 +117,7 @@ fn undo_reverts_last_transformation() {
 }
 
 #[test]
-fn vni_digit_after_space_auto_reopens_commit_within_timeout() {
+fn vni_digit_after_space_does_not_auto_reopen_commit() {
     let session = hc_session_new(InputMode::Vni as i32, 0);
     let mut req = key_request(InputMode::Vni);
 
@@ -128,22 +128,19 @@ fn vni_digit_after_space_auto_reopens_commit_within_timeout() {
     assert_eq!(status, HCStatusFlag::Commit as i32);
 
     // Immediately type "6" (circumflex) without backspace
-    // This should auto-reopen the last commit and apply circumflex
+    // Digit after space should NOT auto-reopen; it passes through unhandled
     req.kind = HCKeyKind::Printable as i32;
     let six = c("6");
     req.text = six.as_ptr();
     let edit = hc_session_handle_key(session, &req);
-    assert_eq!(
-        edit.state.status_flag,
-        HCStatusFlag::ReconversionActive as i32
-    );
-    assert_eq!(read_and_free(edit.state), "không");
+    assert_eq!(edit.handled, 0, "digit after space should not auto-reopen");
+    free_state(edit.state);
 
     hc_session_free(session);
 }
 
 #[test]
-fn vni_digit_after_space_does_not_reopen_after_timeout() {
+fn vni_digit_after_space_does_not_reopen_regardless_of_timeout() {
     let session = hc_session_new(InputMode::Vni as i32, 0);
     let mut req = key_request(InputMode::Vni);
 
@@ -153,14 +150,12 @@ fn vni_digit_after_space_does_not_reopen_after_timeout() {
     assert_eq!(committed, "khong");
     assert_eq!(status, HCStatusFlag::Commit as i32);
 
-    hc_session_test_set_last_commit_age(session, 2_001);
-
-    // Type "6" - should NOT reopen, should be unhandled
+    // Even within timeout, digit should not reopen
     req.kind = HCKeyKind::Printable as i32;
     let six = c("6");
     req.text = six.as_ptr();
     let edit = hc_session_handle_key(session, &req);
-    assert_eq!(edit.handled, 0, "digit after timeout should not be handled");
+    assert_eq!(edit.handled, 0, "digit after space should not be handled");
     free_state(edit.state);
 
     hc_session_free(session);
@@ -192,7 +187,7 @@ fn vni_tone_digit_does_not_reopen_toned_word() {
 }
 
 #[test]
-fn vni_tone_digit_reopens_untone_word() {
+fn vni_tone_digit_does_not_reopen_untone_word() {
     let session = hc_session_new(InputMode::Vni as i32, 0);
     let mut req = key_request(InputMode::Vni);
 
@@ -202,16 +197,12 @@ fn vni_tone_digit_reopens_untone_word() {
     assert_eq!(committed, "khong");
     assert_eq!(status, HCStatusFlag::Commit as i32);
 
-    // Immediately type "1" (tone Sac) - should reopen and apply tone
+    // Immediately type "1" (tone Sac) - should NOT reopen
     req.kind = HCKeyKind::Printable as i32;
     let one = c("1");
     req.text = one.as_ptr();
     let edit = hc_session_handle_key(session, &req);
-    assert_eq!(
-        edit.state.status_flag,
-        HCStatusFlag::ReconversionActive as i32
-    );
-    assert_eq!(read_and_free(edit.state), "khóng");
+    assert_eq!(edit.handled, 0, "tone digit after space should not reopen");
 
     hc_session_free(session);
 }
