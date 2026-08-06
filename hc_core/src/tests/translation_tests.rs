@@ -1048,6 +1048,59 @@ fn hannom_v2_defers_learning_file_io_until_explicit_flush() {
 }
 
 #[test]
+fn hannom_default_history_path_is_absolute_on_every_platform() {
+    // NOM-01, first half: `dirs::state_dir()` is None on macOS, so the default
+    // history path degraded to the relative "han_nom_history.json" and learning
+    // was written next to whatever the host app's working directory happened to
+    // be — in practice nowhere. Every supported platform must resolve a real
+    // state directory.
+    assert!(
+        crate::platform::state_dir().is_some(),
+        "every supported platform must resolve a state directory"
+    );
+    let path = crate::han_nom::default_history_path();
+    assert!(
+        path.is_absolute(),
+        "default history path must be absolute, got {path:?}"
+    );
+    assert_eq!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("han_nom_history.json")
+    );
+}
+
+#[test]
+fn hannom_history_persists_to_a_path_without_a_parent_directory() {
+    // NOM-01, second half: for a bare filename `path.parent()` is Some(""), and
+    // the 0700 chmod on "" failed ENOENT before the temp file was ever written,
+    // so persist() silently wrote nothing. Independent of the path fix above.
+    let dir = std::env::temp_dir().join(format!("hcime-bare-history-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let previous_cwd = std::env::current_dir().unwrap();
+    // The bare filename resolves against the process cwd, so point it at a temp
+    // directory — never at the user's home.
+    std::env::set_current_dir(&dir).unwrap();
+
+    let bare = std::path::Path::new("han_nom_history.json");
+    let mut history = crate::han_nom::PhraseHistory::default();
+    history.record("thành phố", "城庯");
+    let outcome = history.persist(bare);
+    let reloaded = crate::han_nom::PhraseHistory::load(bare)
+        .score("thành phố", "城庯")
+        .0;
+
+    // Restore the process-wide cwd before asserting so a failure cannot leak it.
+    std::env::set_current_dir(&previous_cwd).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        outcome.is_ok(),
+        "persist to a parentless path must succeed, got {outcome:?}"
+    );
+    assert_eq!(reloaded, 1, "the entry must survive the round trip");
+}
+
+#[test]
 fn hannom_v3_exposes_full_candidates_and_selects_absolute_index() {
     let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
     let mut req = key_request(InputMode::HanNomTelex);
@@ -1181,9 +1234,11 @@ fn hannom_v3_out_of_range_selection_is_non_mutating_and_user_tsv_wins() {
         0
     );
     let mut after: HC_HanNomResultV3 = unsafe { std::mem::zeroed() };
-    let equals = c("=");
-    req.kind = HCKeyKind::Printable as i32;
-    req.text = equals.as_ptr();
+    // A second Space re-reports the state without touching it. This used to
+    // press `=`, but the v3 path no longer claims the pager keys (NOM-07) and
+    // an unhandled key leaves the result struct zeroed.
+    req.kind = HCKeyKind::Space as i32;
+    req.text = space.as_ptr();
     hc_session_handle_key_hannom_v3(session, &req, &mut after);
     let reading_after =
         unsafe { std::slice::from_raw_parts(after.reading, after.reading_len as usize) };
@@ -1475,6 +1530,609 @@ fn hannom_backspace_with_nothing_composing_is_unhandled() {
         hc_session_handle_key_hannom_v3(session, &req, &mut result),
         1,
         "backspace during composition edits the reading"
+    );
+
+    hc_session_free(session);
+}
+
+// ── P2 Hán Nôm regressions ──
+
+fn v3_texts(result: &HC_HanNomResultV3) -> Vec<String> {
+    if result.candidates.is_null() {
+        return Vec::new();
+    }
+    let candidates =
+        unsafe { std::slice::from_raw_parts(result.candidates, result.candidate_count as usize) };
+    candidates
+        .iter()
+        .map(|candidate| unsafe {
+            String::from_utf8_lossy(std::slice::from_raw_parts(
+                candidate.text,
+                candidate.text_len as usize,
+            ))
+            .into_owned()
+        })
+        .collect()
+}
+
+fn v3_commit_text(result: &HC_HanNomResultV3) -> String {
+    assert_eq!(result.status_flag, HCStatusFlag::Commit as i32);
+    unsafe {
+        String::from_utf8_lossy(std::slice::from_raw_parts(
+            result.reading,
+            result.reading_len as usize,
+        ))
+        .into_owned()
+    }
+}
+
+/// Types a reading through the v3 handler. A space in `keys` is sent as
+/// `HCKeyKind::Space`, everything else as `Printable`.
+fn v3_type(
+    session: *mut std::ffi::c_void,
+    req: &mut HC_KeyRequest,
+    result: &mut HC_HanNomResultV3,
+    keys: &str,
+) {
+    for ch in keys.chars() {
+        let key = c(&ch.to_string());
+        req.kind = if ch == ' ' {
+            HCKeyKind::Space as i32
+        } else {
+            HCKeyKind::Printable as i32
+        };
+        req.text = key.as_ptr();
+        hc_session_handle_key_hannom_v3(session, req, result);
+    }
+}
+
+fn v3_send(
+    session: *mut std::ffi::c_void,
+    req: &mut HC_KeyRequest,
+    result: &mut HC_HanNomResultV3,
+    kind: HCKeyKind,
+    text: &str,
+) -> i32 {
+    let key = c(text);
+    req.kind = kind as i32;
+    req.text = if text.is_empty() {
+        ptr::null()
+    } else {
+        key.as_ptr()
+    };
+    hc_session_handle_key_hannom_v3(session, req, result)
+}
+
+/// NOM-08, first half. `set_hannom_options` cleared `phrase_history_loaded` on
+/// every call while leaving `phrase_history_dirty` set, so re-applying the same
+/// options — which macOS does on every `configureHanNom()` — dropped everything
+/// learned since the last flush and then wrote the reloaded copy back over the
+/// file. Measured before the fix: ranking reverted and the file became
+/// `{"entries":[]}`.
+#[test]
+fn hannom_reapplying_options_keeps_unflushed_learning() {
+    let path = crate::han_nom::get_global_phrase_history_path();
+    let _ = std::fs::remove_file(&path);
+
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut result: HC_HanNomResultV3 = unsafe { std::mem::zeroed() };
+
+    v3_type(session, &mut req, &mut result, "hai nam");
+    let ranked = v3_texts(&result);
+    assert!(ranked.len() > 5, "expected a ranked candidate list");
+    let learned = ranked[4].clone();
+    assert_ne!(learned, ranked[0], "the learned glyph must not already win");
+    assert_eq!(
+        hc_session_select_hannom_candidate_v3(session, 4, &mut result),
+        1
+    );
+
+    hc_session_reset(session);
+    v3_type(session, &mut req, &mut result, "hai nam");
+    assert_eq!(
+        v3_texts(&result)[0],
+        learned,
+        "the selection must be learned in memory"
+    );
+
+    // Exactly what HCIMEInputController does on init and on every settings change.
+    hc_session_set_hannom_options(
+        session,
+        &HC_HanNomOptions {
+            phrase_prediction: 1,
+            learning_enabled: 1,
+            history_path: ptr::null(),
+        },
+    );
+    hc_session_reset(session);
+    v3_type(session, &mut req, &mut result, "hai nam");
+    assert_eq!(
+        v3_texts(&result)[0],
+        learned,
+        "re-applying options must not discard learning that has not reached disk yet"
+    );
+
+    hc_session_flush_hannom_learning(session);
+    assert_eq!(
+        crate::han_nom::PhraseHistory::load(&path)
+            .score("hai nam", &learned)
+            .0,
+        1,
+        "flush must persist the learned selection, not an emptied reload"
+    );
+    hc_session_free(session);
+}
+
+/// NOM-08, second half. The default history path was served from a process-wide
+/// `OnceLock` snapshot of the file taken at process start, so no session ever
+/// observed another session's writes. IMK creates one session per client
+/// application, so the second application to start would flush its stale
+/// snapshot over whatever the first had learned.
+#[test]
+fn hannom_default_history_is_reread_not_snapshotted_per_process() {
+    let path = crate::han_nom::get_global_phrase_history_path();
+    let _ = std::fs::remove_file(&path);
+
+    let first = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut result: HC_HanNomResultV3 = unsafe { std::mem::zeroed() };
+    v3_type(first, &mut req, &mut result, "hai nam");
+    let ranked = v3_texts(&result);
+    let learned = ranked[4].clone();
+    assert_ne!(learned, ranked[0]);
+    assert_eq!(
+        hc_session_select_hannom_candidate_v3(first, 4, &mut result),
+        1
+    );
+    hc_session_flush_hannom_learning(first);
+    hc_session_free(first);
+    assert_eq!(
+        crate::han_nom::PhraseHistory::load(&path)
+            .score("hai nam", &learned)
+            .0,
+        1,
+        "precondition: the first session wrote its learning to the shared file"
+    );
+
+    let second = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut second_result: HC_HanNomResultV3 = unsafe { std::mem::zeroed() };
+    v3_type(second, &mut req, &mut second_result, "hai nam");
+    assert_eq!(
+        v3_texts(&second_result)[0],
+        learned,
+        "a session started after the write must read the file, not a snapshot \
+         of it taken when the process began"
+    );
+    hc_session_free(second);
+}
+
+/// NOM-05. The toneless fallback iterated `entries`, a `HashMap` whose
+/// `RandomState` is reseeded per process, so identical keystrokes produced a
+/// different candidate order — and, because callers take only the first
+/// `GENERATED_PAIR_WIDTH` of the list, a different candidate *set* — on every
+/// launch. A freshly constructed dictionary reproduces a fresh process's
+/// hashing seed.
+#[test]
+fn nom_toneless_fallback_is_identical_across_dictionary_instances() {
+    let reference =
+        crate::han_nom::EmbeddedNomDict::from_binary(crate::han_nom::EMBEDDED_DICT_DATA).unwrap();
+    let baseline = reference.lookup("nàm");
+    assert!(
+        baseline.len() > crate::translation::GENERATED_PAIR_WIDTH,
+        "the probe reading must miss the exact lookup and return more candidates \
+         than the cross product consumes, or a reordering would be invisible"
+    );
+
+    for attempt in 0..8 {
+        let other =
+            crate::han_nom::EmbeddedNomDict::from_binary(crate::han_nom::EMBEDDED_DICT_DATA)
+                .unwrap();
+        assert_eq!(
+            other.lookup("nàm"),
+            baseline,
+            "attempt {attempt}: the toneless fallback must not depend on hash order"
+        );
+    }
+
+    // The merge itself is unchanged: every toned spelling still contributes.
+    for reading in ["nam", "nắm", "năm"] {
+        for glyph in reference.lookup(reading) {
+            assert!(
+                baseline.contains(&glyph),
+                "{reading} contributes {glyph} to the toneless fallback"
+            );
+        }
+    }
+    // NOM-13 (backlog) — the fallback still merges readings that differ only by
+    // đ/d. Asserted so a future change to the index cannot quietly widen it.
+    assert_eq!(reference.lookup("dá"), reference.lookup("đạ"));
+}
+
+/// PERF-03. Every incomplete reading misses the exact lookup, so the fallback
+/// ran 2–4 times per Hán Nôm keystroke; it scanned all 7,079 keys and allocated
+/// a `String` per key, measured at 410–440 µs against 0.04 µs for a hit.
+#[test]
+fn nom_dictionary_miss_does_not_strip_every_key() {
+    let dict = crate::han_nom::get_global_dict().unwrap();
+    assert!(
+        dict.len() > 1000,
+        "precondition: a real dictionary is loaded"
+    );
+
+    crate::han_nom::probe::reset();
+    let fallback = dict.lookup("nàm");
+    let strips = crate::han_nom::probe::toneless_strips();
+    assert!(
+        !fallback.is_empty(),
+        "the probe reading must actually take the fallback path"
+    );
+    assert!(
+        strips <= 2,
+        "a dictionary miss stripped marks {strips} times over {} entries — \
+         the fallback is scanning every key instead of using an index",
+        dict.len()
+    );
+}
+
+/// NOM-06. Every arm of the Escape handler returned 1, so in Hán Nôm mode
+/// Escape never reached the application: no dialog dismissal, no vim normal
+/// mode. Vietnamese and the Hán Nôm backspace path both fall through here.
+#[test]
+fn hannom_escape_with_nothing_composing_is_unhandled() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut result: HC_HanNomResultV3 = unsafe { std::mem::zeroed() };
+
+    assert_eq!(
+        v3_send(session, &mut req, &mut result, HCKeyKind::Escape, ""),
+        0,
+        "escape on a fresh session belongs to the application"
+    );
+
+    v3_type(session, &mut req, &mut result, "hai");
+    assert_eq!(
+        v3_send(session, &mut req, &mut result, HCKeyKind::Escape, ""),
+        1,
+        "escape cancels a live composition"
+    );
+    assert_eq!(
+        v3_send(session, &mut req, &mut result, HCKeyKind::Escape, ""),
+        0,
+        "once the composition is cancelled the next escape is the application's"
+    );
+
+    v3_type(session, &mut req, &mut result, "hai");
+    assert_eq!(
+        v3_send(session, &mut req, &mut result, HCKeyKind::Enter, ""),
+        1
+    );
+    assert_eq!(result.status_flag, HCStatusFlag::Commit as i32);
+    assert_eq!(
+        v3_send(session, &mut req, &mut result, HCKeyKind::Escape, ""),
+        0,
+        "escape after a commit belongs to the application"
+    );
+
+    // Two-word state: the first escape drops the pending first word, the second
+    // has nothing left to cancel.
+    v3_type(session, &mut req, &mut result, "hai ");
+    assert_eq!(
+        v3_send(session, &mut req, &mut result, HCKeyKind::Escape, ""),
+        1
+    );
+    assert_eq!(
+        v3_send(session, &mut req, &mut result, HCKeyKind::Escape, ""),
+        0
+    );
+
+    hc_session_free(session);
+}
+
+/// NOM-07. `=`, `+`, `[`, `]` and `-` were intercepted as candidate-page
+/// navigation before any emptiness check, so on a fresh session all five
+/// returned handled with no state change and `1+1=2` lost its operators. On the
+/// shipping v3/v4 path they did nothing at all, because `populate_nom_result_v3`
+/// ignores `phrase_candidate_page`.
+#[test]
+fn hannom_pager_keys_reach_the_client_when_they_cannot_page() {
+    for key in ["=", "+", "[", "]", "-"] {
+        let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+        let mut req = key_request(InputMode::HanNomTelex);
+        let mut result: HC_HanNomResultV3 = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            v3_send(session, &mut req, &mut result, HCKeyKind::Printable, key),
+            0,
+            "{key:?} on a fresh session has no candidate list to page and must \
+             reach the application"
+        );
+        hc_session_free(session);
+
+        // The deprecated v2 entry point still pages, but only when there is
+        // something to page — see
+        // hannom_v2_pages_single_glyph_candidates_without_treating_navigation_as_text.
+        let v2_session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+        let mut v2_req = key_request(InputMode::HanNomTelex);
+        let mut v2_result: HC_HanNomResultV2 = unsafe { std::mem::zeroed() };
+        let text = c(key);
+        v2_req.kind = HCKeyKind::Printable as i32;
+        v2_req.text = text.as_ptr();
+        #[allow(deprecated)]
+        let handled = hc_session_handle_key_hannom_v2(v2_session, &v2_req, &mut v2_result);
+        assert_eq!(
+            handled, 0,
+            "{key:?} on a fresh v2 session is the client's too"
+        );
+        hc_session_free(v2_session);
+    }
+
+    // `1+1=2`: every character the engine does not own reaches the application.
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut result: HC_HanNomResultV3 = unsafe { std::mem::zeroed() };
+    for key in ["1", "+", "1", "=", "2"] {
+        assert_eq!(
+            v3_send(session, &mut req, &mut result, HCKeyKind::Printable, key),
+            0,
+            "typing 1+1=2 must not lose {key:?}"
+        );
+    }
+    hc_session_free(session);
+
+    // While composing on the v3 path the key is still the client's, and it must
+    // not be absorbed into the reading either: the commit is unchanged.
+    let control = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut control_result: HC_HanNomResultV3 = unsafe { std::mem::zeroed() };
+    v3_type(control, &mut req, &mut control_result, "nhaan");
+    v3_send(control, &mut req, &mut control_result, HCKeyKind::Enter, "");
+    let expected = v3_commit_text(&control_result);
+    hc_session_free(control);
+
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    v3_type(session, &mut req, &mut result, "nhaan");
+    assert_eq!(
+        v3_send(session, &mut req, &mut result, HCKeyKind::Printable, "="),
+        0,
+        "v3 hands the whole candidate list to the frontend, so `=` never paged \
+         anything and must not be swallowed"
+    );
+    v3_send(session, &mut req, &mut result, HCKeyKind::Enter, "");
+    assert_eq!(
+        v3_commit_text(&result),
+        expected,
+        "the declined key must not have entered the reading"
+    );
+    hc_session_free(session);
+}
+
+/// NOM-09. The punctuation commit took `phrase_candidates.first()` without
+/// checking that a second syllable had been typed, so after `hai` + Space every
+/// candidate was a *prediction* and `(` committed `𠄩𤖸(` — "hai chấm" — plus a
+/// learned selection for a word the user never typed.
+#[test]
+fn hannom_punctuation_after_space_commits_only_the_typed_word() {
+    let path = crate::han_nom::get_global_phrase_history_path();
+    let _ = std::fs::remove_file(&path);
+
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut result: HC_HanNomResultV3 = unsafe { std::mem::zeroed() };
+    v3_type(session, &mut req, &mut result, "hai ");
+    assert!(
+        v3_texts(&result)
+            .iter()
+            .any(|text| text.chars().count() == 2),
+        "precondition: the prediction list offers two-glyph phrases"
+    );
+
+    assert_eq!(
+        v3_send(session, &mut req, &mut result, HCKeyKind::Printable, "("),
+        1
+    );
+    let committed = v3_commit_text(&result);
+    let glyphs: Vec<char> = committed.chars().collect();
+    assert_eq!(
+        glyphs.len(),
+        2,
+        "committed {committed:?} — only the typed syllable and the punctuation \
+         belong here, never a predicted second syllable"
+    );
+    assert_eq!(glyphs[1], '(');
+    assert!(
+        crate::han_nom::get_global_dict()
+            .unwrap()
+            .lookup("hai")
+            .contains(&glyphs[0]),
+        "{:?} must be a Nôm glyph for the syllable that was typed",
+        glyphs[0]
+    );
+
+    hc_session_flush_hannom_learning(session);
+    let saved = crate::han_nom::PhraseHistory::load(&path);
+    assert!(
+        saved.entries.iter().all(|entry| entry.reading == "hai"),
+        "learning must be keyed to the syllable the user typed, got {:?}",
+        saved.entries
+    );
+    assert_eq!(saved.score("hai", &glyphs[0].to_string()).0, 1);
+    hc_session_free(session);
+}
+
+/// PERF-04 and NOM-12. `populate_nom_result_v2` rebuilt the candidate list and
+/// `populate_nom_result_v3` immediately rebuilt it again, discarding the first
+/// result — instrumented at `rebuild=2 sort=2` on every key. And the sort
+/// comparator called `PhraseHistory::score` twice per comparison, making the
+/// number of history scans Θ(n log n) in the candidate count.
+#[test]
+fn hannom_keystroke_rebuilds_once_and_scores_each_candidate_once() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut result: HC_HanNomResultV3 = unsafe { std::mem::zeroed() };
+    v3_type(session, &mut req, &mut result, "n");
+
+    crate::han_nom::probe::reset();
+    v3_send(session, &mut req, &mut result, HCKeyKind::Space, " ");
+    let rebuilds = crate::han_nom::probe::phrase_rebuilds();
+    let scores = crate::han_nom::probe::history_score_calls();
+    let candidates = result.total_candidate_count as usize;
+
+    assert!(
+        candidates > 64,
+        "the probe keystroke must produce a large candidate list, got {candidates}"
+    );
+    assert_eq!(
+        rebuilds, 1,
+        "one keystroke must rebuild the candidate list once, not {rebuilds} times"
+    );
+    // One score per candidate, plus the duplicates the ranker discards after
+    // sorting. Scoring inside the comparator instead measured 4,040 lookups on
+    // this exact keystroke.
+    assert!(
+        scores <= candidates + candidates / 8,
+        "ranking {candidates} candidates took {scores} history lookups — the \
+         comparator is scoring per comparison instead of per candidate"
+    );
+    hc_session_free(session);
+}
+
+/// NOM-12. `record` capped the history at 2,048 entries but `load` applied no
+/// bound at all, so a file that grew by any other route was taken whole and
+/// every ranking comparison walked it.
+#[test]
+fn phrase_history_load_is_bounded_like_record() {
+    let dir = std::env::temp_dir().join(format!("hcime-history-cap-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("oversized.json");
+    let oversized = crate::han_nom::PhraseHistory {
+        entries: (0..5000)
+            .map(|index| crate::han_nom::PhraseHistoryEntry {
+                reading: format!("reading{index} second{index}"),
+                glyphs: format!("glyph{index}"),
+                count: 1,
+                last_used: index as u64,
+            })
+            .collect(),
+    };
+    std::fs::write(&path, serde_json::to_vec(&oversized).unwrap()).unwrap();
+
+    let loaded = crate::han_nom::PhraseHistory::load(&path);
+    assert_eq!(
+        loaded.entries.len(),
+        crate::han_nom::PHRASE_HISTORY_MAX_ENTRIES,
+        "an oversized history file must be truncated on load"
+    );
+    assert_eq!(
+        loaded.score("reading4999 second4999", "glyph4999").0,
+        1,
+        "the most recently used entries survive"
+    );
+    assert_eq!(
+        loaded.score("reading0 second0", "glyph0"),
+        (0, 0),
+        "the least recently used entries are evicted"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// NOM-17 / the composition cap. `raw_buffer.len() < 64` was measured *before*
+/// the append, so a key text that straddled the limit landed in full: 63 bytes
+/// plus a four-byte scalar produced a 67-byte reading. The cap is in bytes —
+/// see `MAX_READING_BYTES`.
+#[test]
+fn hannom_reading_cap_counts_the_key_being_added() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut result: HC_HanNomResultV3 = unsafe { std::mem::zeroed() };
+
+    // `b` is not a Telex trigger, so the rendered reading tracks the raw buffer
+    // byte for byte.
+    for _ in 0..63 {
+        v3_send(session, &mut req, &mut result, HCKeyKind::Printable, "b");
+    }
+    assert_eq!(
+        result.reading_len, 63,
+        "precondition: the buffer sits one byte below the cap"
+    );
+
+    // A four-byte scalar cannot fit in the one remaining byte.
+    v3_send(session, &mut req, &mut result, HCKeyKind::Printable, "𠄩");
+    assert_eq!(
+        result.reading_len, 63,
+        "a key that does not fit must be rejected whole, not appended past the cap"
+    );
+
+    hc_session_free(session);
+}
+
+/// FFI-06. The published candidate pointers borrowed the `String`s inside
+/// `phrase_candidates`, which `reset()` drops — and `reset()` runs on every
+/// commit, on `hc_session_select_hannom_candidate_v3` (both frontends call it)
+/// and on `hc_session_reset`, none of which hand the caller a replacement list.
+/// The bytes are copied into an arena that is rewritten only when a new list is
+/// published.
+#[test]
+fn hannom_published_candidates_do_not_borrow_the_list_reset_drops() {
+    let session = hc_session_new(InputMode::HanNomTelex as i32, 0);
+    let mut req = key_request(InputMode::HanNomTelex);
+    let mut result: HC_HanNomResultV3 = unsafe { std::mem::zeroed() };
+    v3_type(session, &mut req, &mut result, "hai nam");
+    assert!(result.candidate_count > 0);
+
+    let published = v3_texts(&result);
+    let candidates = result.candidates;
+    let count = result.candidate_count as usize;
+    let published_bytes = unsafe { (*candidates).text };
+
+    let live_bytes = {
+        let session = unsafe { &mut *(session as *mut crate::session::Session) };
+        let translator = session.translator_mut().expect("Hán Nôm session");
+        translator.phrase_candidates[0].text.as_ptr()
+    };
+    assert_ne!(
+        published_bytes, live_bytes,
+        "published candidate pointers must not address the candidate list that \
+         reset() drops"
+    );
+
+    // Nothing below publishes a replacement, so the pointers stay readable.
+    hc_session_reset(session);
+    let after_reset: Vec<String> = unsafe { std::slice::from_raw_parts(candidates, count) }
+        .iter()
+        .map(|candidate| unsafe {
+            String::from_utf8_lossy(std::slice::from_raw_parts(
+                candidate.text,
+                candidate.text_len as usize,
+            ))
+            .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        after_reset, published,
+        "hc_session_reset must not free them"
+    );
+
+    v3_type(session, &mut req, &mut result, "hai nam");
+    let candidates = result.candidates;
+    let count = result.candidate_count as usize;
+    let published = v3_texts(&result);
+    assert_eq!(
+        hc_session_select_hannom_candidate_v3(session, 0, &mut result),
+        1
+    );
+    let after_select: Vec<String> = unsafe { std::slice::from_raw_parts(candidates, count) }
+        .iter()
+        .map(|candidate| unsafe {
+            String::from_utf8_lossy(std::slice::from_raw_parts(
+                candidate.text,
+                candidate.text_len as usize,
+            ))
+            .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        after_select, published,
+        "selecting a candidate must not free the list the frontend is still \
+         showing"
     );
 
     hc_session_free(session);

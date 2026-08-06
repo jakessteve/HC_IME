@@ -17,8 +17,17 @@ pub fn config_dir() -> Option<PathBuf> {
 /// Returns the platform-specific state directory joined with "hcime".
 ///
 /// On Linux this resolves to `$XDG_STATE_HOME/hcime` or `~/.local/state/hcime`.
+///
+/// Only the XDG platforms define a state directory, so `dirs::state_dir()` is
+/// `None` on macOS and Windows. Those platforms fall back to the data directory
+/// (`~/Library/Application Support/hcime`, `%APPDATA%\hcime`), which is where
+/// they conventionally keep this kind of file. Without the fallback, callers
+/// degrade to a relative path and write user state into the host app's working
+/// directory. Linux is unaffected: `dirs::state_dir()` is always `Some` there.
 pub fn state_dir() -> Option<PathBuf> {
-    dirs::state_dir().map(|p| p.join("hcime"))
+    dirs::state_dir()
+        .or_else(dirs::data_dir)
+        .map(|p| p.join("hcime"))
 }
 
 /// Returns a priority-ordered list of candidate dictionary search directories.

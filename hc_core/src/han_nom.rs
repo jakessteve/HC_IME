@@ -235,9 +235,69 @@ impl EmbeddedPhraseDict {
     }
 }
 
+/// Test-only instrumentation.
+///
+/// The NOM-12 / PERF-03 / PERF-04 fixes are properties of *how much work
+/// happens*, not of wall-clock time, so the regression tests assert on these
+/// counters instead of on a stopwatch. Thread-local, because the test harness
+/// runs tests in parallel on one process and a shared atomic would let one
+/// test see another's keystrokes.
+#[cfg(test)]
+pub(crate) mod probe {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// `strip_all_marks` calls made inside `EmbeddedNomDict::lookup`. The
+        /// old fallback stripped every one of the 7,079 keys on every miss.
+        static TONELESS_STRIPS: Cell<usize> = const { Cell::new(0) };
+        static HISTORY_SCORE_CALLS: Cell<usize> = const { Cell::new(0) };
+        static PHRASE_REBUILDS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn reset() {
+        TONELESS_STRIPS.with(|cell| cell.set(0));
+        HISTORY_SCORE_CALLS.with(|cell| cell.set(0));
+        PHRASE_REBUILDS.with(|cell| cell.set(0));
+    }
+
+    pub(crate) fn note_toneless_strip() {
+        TONELESS_STRIPS.with(|cell| cell.set(cell.get() + 1));
+    }
+
+    pub(crate) fn note_history_score_call() {
+        HISTORY_SCORE_CALLS.with(|cell| cell.set(cell.get() + 1));
+    }
+
+    pub(crate) fn note_phrase_rebuild() {
+        PHRASE_REBUILDS.with(|cell| cell.set(cell.get() + 1));
+    }
+
+    pub(crate) fn toneless_strips() -> usize {
+        TONELESS_STRIPS.with(|cell| cell.get())
+    }
+
+    pub(crate) fn history_score_calls() -> usize {
+        HISTORY_SCORE_CALLS.with(|cell| cell.get())
+    }
+
+    pub(crate) fn phrase_rebuilds() -> usize {
+        PHRASE_REBUILDS.with(|cell| cell.get())
+    }
+}
+
 #[derive(Debug)]
 pub struct EmbeddedNomDict {
     entries: HashMap<String, Vec<char>>,
+    /// Toneless reading -> the merged, de-duplicated candidates of every entry
+    /// that strips down to it. Precomputed at load so the fallback in `lookup`
+    /// is a hash probe.
+    ///
+    /// It also makes the fallback *deterministic*: it used to iterate
+    /// `entries`, a `HashMap` whose `RandomState` is reseeded per process, so
+    /// the candidate order — and, once the caller truncated the list, the
+    /// candidate set — changed on every launch (NOM-05). Buckets are built in
+    /// dictionary file order instead.
+    toneless: HashMap<String, Vec<char>>,
 }
 
 impl EmbeddedNomDict {
@@ -254,6 +314,10 @@ impl EmbeddedNomDict {
         let count = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
         let mut idx = 12;
         let mut entries = HashMap::with_capacity(count);
+        // Readings in file order. `entries` is a HashMap and iterating it to
+        // build the toneless index would reintroduce the per-process ordering
+        // this index exists to remove.
+        let mut order: Vec<String> = Vec::with_capacity(count);
 
         for _ in 0..count {
             if idx >= data.len() {
@@ -287,10 +351,27 @@ impl EmbeddedNomDict {
                     candidates.push(ch);
                 }
             }
+            order.push(reading.clone());
             entries.insert(reading, candidates);
         }
 
-        Ok(EmbeddedNomDict { entries })
+        // Merge in file order. Reading the value back out of `entries` (rather
+        // than using the decoded vector directly) keeps a duplicated reading
+        // resolving to the same single value the exact lookup would return.
+        let mut toneless: HashMap<String, Vec<char>> = HashMap::with_capacity(count);
+        for reading in &order {
+            let Some(candidates) = entries.get(reading) else {
+                continue;
+            };
+            let bucket = toneless.entry(strip_all_marks(reading)).or_default();
+            for &ch in candidates {
+                if !bucket.contains(&ch) {
+                    bucket.push(ch);
+                }
+            }
+        }
+
+        Ok(EmbeddedNomDict { entries, toneless })
     }
 
     pub fn lookup(&self, reading: &str) -> Vec<char> {
@@ -301,18 +382,19 @@ impl EmbeddedNomDict {
         if let Some(found) = self.entries.get(&lower) {
             return found.clone();
         }
-        let input_toneless = strip_all_marks(&lower);
-        let mut fallback = Vec::new();
-        for (k, v) in &self.entries {
-            if strip_all_marks(k) == input_toneless {
-                for &ch in v {
-                    if !fallback.contains(&ch) {
-                        fallback.push(ch);
-                    }
-                }
-            }
-        }
-        fallback
+        // Every incomplete reading lands here, so this runs 2–4 times per Hán
+        // Nôm keystroke. It used to scan all 7,079 entries and allocate a
+        // `String` per entry (PERF-03, 440 µs); the index makes it one probe.
+        //
+        // The merge is unchanged, including the fact that it collapses readings
+        // that differ only by đ/d or a vowel shape (NOM-13): `strip_all_marks`
+        // is the same key function as before.
+        #[cfg(test)]
+        probe::note_toneless_strip();
+        self.toneless
+            .get(&strip_all_marks(&lower))
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -392,6 +474,13 @@ pub struct PhraseHistoryEntry {
     pub last_used: u64,
 }
 
+/// Learned `(reading, glyphs)` selections.
+///
+/// `entries` is kept ordered by `(reading, glyphs)`. That is not cosmetic:
+/// `score` is called once per candidate by the ranker — up to ~1,000 times on
+/// a single keystroke — and a linear scan of the history made keystroke
+/// latency scale with how much the user had learned (NOM-12). Anything that
+/// touches `entries` must restore the order before returning.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PhraseHistory {
     pub entries: Vec<PhraseHistoryEntry>,
@@ -403,34 +492,89 @@ pub fn default_history_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("han_nom_history.json"))
 }
 
+#[cfg(not(test))]
 static GLOBAL_PHRASE_HISTORY_PATH: OnceLock<PathBuf> = OnceLock::new();
 
+/// The history file every session uses unless the frontend configures its own.
+///
+/// Caching the *path* is safe — it cannot change while the process runs. What
+/// must never be cached is the file's *contents*: a process-wide snapshot of
+/// those meant no session ever observed another session's writes, and IMK
+/// creates one session per client application (NOM-08).
+#[cfg(not(test))]
 pub fn get_global_phrase_history_path() -> PathBuf {
     GLOBAL_PHRASE_HISTORY_PATH
         .get_or_init(default_history_path)
         .clone()
 }
 
-static INITIAL_PHRASE_HISTORY: OnceLock<PhraseHistory> = OnceLock::new();
+/// Sessions flush Hán Nôm learning on free, so under `cargo test` the default
+/// path is redirected into a temp directory. Without this the suite writes to
+/// the developer's real state directory. `default_history_path()` itself stays
+/// production-accurate and is asserted on directly.
+///
+/// It is also per-thread: the harness runs tests in parallel on one process,
+/// and a single shared default file would let one test's flush overwrite the
+/// history another test is asserting on.
+#[cfg(test)]
+pub fn get_global_phrase_history_path() -> PathBuf {
+    let thread: String = format!("{:?}", std::thread::current().id())
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect();
+    std::env::temp_dir()
+        .join(format!("hcime-test-state-{}", std::process::id()))
+        .join(format!("han_nom_history-{thread}.json"))
+}
 
-pub fn get_initial_phrase_history() -> PhraseHistory {
-    INITIAL_PHRASE_HISTORY
-        .get_or_init(|| PhraseHistory::load(&get_global_phrase_history_path()))
-        .clone()
+/// Learning is capped so an unbounded file cannot make ranking — and therefore
+/// typing — arbitrarily slow.
+pub const PHRASE_HISTORY_MAX_ENTRIES: usize = 2048;
+
+fn key_of(entry: &PhraseHistoryEntry) -> (&str, &str) {
+    (entry.reading.as_str(), entry.glyphs.as_str())
 }
 
 impl PhraseHistory {
     pub fn load(path: &Path) -> Self {
-        fs::read(path)
+        let mut history: Self = fs::read(path)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // The file is arbitrary input: order it before anything can search it.
+        history.restore_key_order();
+        // `record` enforces the cap, `load` did not, so a file that grew by any
+        // other route (an older build, a hand-edit, a sync conflict) was taken
+        // whole and every ranking comparison then walked it (NOM-12).
+        history.enforce_cap();
+        history
+    }
+    fn restore_key_order(&mut self) {
+        self.entries
+            .sort_by(|left, right| key_of(left).cmp(&key_of(right)));
+    }
+    /// Keeps the most recently used entries, then restores the search order.
+    fn enforce_cap(&mut self) {
+        if self.entries.len() > PHRASE_HISTORY_MAX_ENTRIES {
+            self.entries
+                .sort_by_key(|entry| std::cmp::Reverse(entry.last_used));
+            self.entries.truncate(PHRASE_HISTORY_MAX_ENTRIES);
+            self.restore_key_order();
+        }
+    }
+    fn position(&self, reading: &str, glyphs: &str) -> Result<usize, usize> {
+        self.entries
+            .binary_search_by(|entry| key_of(entry).cmp(&(reading, glyphs)))
     }
     pub fn score(&self, reading: &str, glyphs: &str) -> (u32, u64) {
-        self.entries
-            .iter()
-            .find(|item| item.reading == reading && item.glyphs == glyphs)
-            .map(|item| (item.count, item.last_used))
+        #[cfg(test)]
+        probe::note_history_score_call();
+        self.position(reading, glyphs)
+            .ok()
+            .map(|index| {
+                let entry = &self.entries[index];
+                (entry.count, entry.last_used)
+            })
             .unwrap_or((0, 0))
     }
     pub fn record(&mut self, reading: &str, glyphs: &str) {
@@ -438,36 +582,39 @@ impl PhraseHistory {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        if let Some(entry) = self
-            .entries
-            .iter_mut()
-            .find(|item| item.reading == reading && item.glyphs == glyphs)
-        {
-            entry.count = entry.count.saturating_add(1);
-            entry.last_used = now;
-        } else {
-            self.entries.push(PhraseHistoryEntry {
-                reading: reading.to_owned(),
-                glyphs: glyphs.to_owned(),
-                count: 1,
-                last_used: now,
-            });
+        match self.position(reading, glyphs) {
+            Ok(index) => {
+                let entry = &mut self.entries[index];
+                entry.count = entry.count.saturating_add(1);
+                entry.last_used = now;
+            }
+            Err(index) => self.entries.insert(
+                index,
+                PhraseHistoryEntry {
+                    reading: reading.to_owned(),
+                    glyphs: glyphs.to_owned(),
+                    count: 1,
+                    last_used: now,
+                },
+            ),
         }
-        if self.entries.len() > 2048 {
-            self.entries
-                .sort_by_key(|entry| std::cmp::Reverse(entry.last_used));
-            self.entries.truncate(2048);
-        }
+        self.enforce_cap();
     }
     pub fn persist(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
+        // A bare filename ("history.json") has an *empty* parent, not none:
+        // creating or chmod-ing "" fails ENOENT and would abort the write before
+        // the temp file is ever produced. Skip the directory step there.
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             if !parent.exists() {
                 fs::create_dir_all(parent)?;
             }
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+                // Best-effort: the history file itself is locked to 0600 below,
+                // so a directory we are not allowed to chmod (shared or owned by
+                // someone else) must not cost the user their learning data.
+                let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
             }
             #[cfg(not(unix))]
             {

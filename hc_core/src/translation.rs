@@ -1,9 +1,8 @@
 use crate::compose;
 use crate::composition::{render_raw_input, CompositionEngine};
 use crate::han_nom::{
-    get_global_dict, get_global_phrase_dict, get_global_phrase_history_path,
-    get_initial_phrase_history, load_user_phrase_dict, normalize_phrase_reading, PhraseEntry,
-    PhraseHistory,
+    get_global_dict, get_global_phrase_dict, get_global_phrase_history_path, load_user_phrase_dict,
+    normalize_phrase_reading, PhraseEntry, PhraseHistory,
 };
 use crate::types::*;
 use std::any::Any;
@@ -14,6 +13,23 @@ use std::ptr;
 /// How many single-glyph candidates each side of a generated pair draws from.
 /// The rank stride below must match it exactly.
 pub(crate) const GENERATED_PAIR_WIDTH: usize = 9;
+
+/// Upper bound on the raw-keystroke buffer behind a Hán Nôm reading.
+///
+/// The test was `raw_buffer.len() < 64` — measured *before* the append, so a
+/// single oversized key text still landed in full and the buffer could reach
+/// 127 bytes.
+///
+/// The unit is bytes, deliberately (NOM-17 asks whether it should be
+/// characters). A reading is raw keystrokes, and every supported method —
+/// Telex, VNI, VIQR — types them as ASCII, so for real input bytes and
+/// characters are the same number. The sinks downstream are byte-bounded:
+/// `HC_HanNomResult.reading` is a `[u8; 256]` that truncates at 255 bytes, and
+/// the ABI bounds one key event at `HC_MAX_KEY_TEXT_BYTES` bytes. A 64-*char*
+/// cap would admit 256 bytes of CJK and push a reading straight into that
+/// truncation, which splits UTF-8 (FFI-10). Matching units keeps the two
+/// bounds composable.
+const MAX_READING_BYTES: usize = 64;
 
 // ── Public trait types ──
 
@@ -30,6 +46,15 @@ pub enum CandidateKind {
     Prediction,
     Fallback,
     Single,
+}
+
+/// Where one published candidate's bytes live inside `ffi_candidate_arena`.
+#[derive(Debug, Clone, Copy)]
+struct PublishedSpan {
+    /// (offset, byte length)
+    text: (usize, usize),
+    reading: (usize, usize),
+    kind: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -58,9 +83,13 @@ pub trait Translator {
 
 /// FFI pointer lifetime contract:
 /// - Pointers returned in HC_HanNomResultV3 (candidates, reading) are valid
-///   until the next call to any method on this HanNomTranslator.
-/// - The underlying buffers (ffi_candidates_buf, ffi_phrase_candidates_buf)
-///   are owned by this struct and reused across calls.
+///   until the next call that publishes a new candidate list.
+/// - The underlying buffers (ffi_candidates_buf, ffi_phrase_candidates_buf,
+///   ffi_candidate_arena) are owned by this struct and reused across calls.
+/// - Candidate text and readings are *copied* into ffi_candidate_arena at
+///   publish time. They deliberately do not borrow `phrase_candidates`, which
+///   `reset()` drops on every commit, on every selection and on
+///   `hc_session_reset` — none of which hand the caller a replacement.
 pub(crate) struct HanNomTranslator {
     pub(crate) nom_phase: NomPhase,
     pub(crate) nom_candidates: Vec<char>,
@@ -71,6 +100,11 @@ pub(crate) struct HanNomTranslator {
     pub(crate) phrase_candidates: Vec<NomTextCandidate>,
     pub(crate) phrase_candidate_page: usize,
     pub(crate) ffi_phrase_candidates_buf: Vec<HC_HanNomCandidateText>,
+    /// Owns every byte the published candidate pointers address. Rewritten only
+    /// by `publish_candidates`, i.e. only when the caller is being handed a
+    /// replacement list.
+    pub(crate) ffi_candidate_arena: String,
+    ffi_candidate_spans: Vec<PublishedSpan>,
     pub(crate) ffi_v2_output: String,
     pub(crate) phrase_prediction_enabled: bool,
     pub(crate) phrase_learning_enabled: bool,
@@ -94,6 +128,8 @@ impl HanNomTranslator {
             phrase_candidates: Vec::new(),
             phrase_candidate_page: 0,
             ffi_phrase_candidates_buf: Vec::new(),
+            ffi_candidate_arena: String::new(),
+            ffi_candidate_spans: Vec::new(),
             ffi_v2_output: String::new(),
             phrase_prediction_enabled: true,
             phrase_learning_enabled: true,
@@ -116,6 +152,9 @@ impl HanNomTranslator {
         self.phrase_candidates.clear();
         self.phrase_candidate_page = 0;
         self.ffi_phrase_candidates_buf.clear();
+        // `ffi_candidate_arena` is deliberately left alone. A reset publishes
+        // nothing, so the caller has no replacement to move to and the bytes
+        // its candidate pointers address must outlive this call (FFI-06).
     }
 
     fn full_reset(&mut self, composition: &mut CompositionEngine) {
@@ -123,13 +162,17 @@ impl HanNomTranslator {
         composition.reset();
     }
 
+    /// Loads the history file once per session, or once per genuine change of
+    /// history path. Not per keystroke — see invariant 3.
+    ///
+    /// The default path used to be served from a process-wide `OnceLock`
+    /// snapshot taken at process start, so a session never saw what another
+    /// session had written, and on a machine where the file did not exist at
+    /// start-up every session began empty and then flushed that emptiness over
+    /// the real file (NOM-08).
     pub(crate) fn ensure_phrase_history_loaded(&mut self) {
         if !self.phrase_history_loaded {
-            if self.phrase_history_path == get_global_phrase_history_path() {
-                self.phrase_history = get_initial_phrase_history();
-            } else {
-                self.phrase_history = PhraseHistory::load(&self.phrase_history_path);
-            }
+            self.phrase_history = PhraseHistory::load(&self.phrase_history_path);
             self.phrase_history_loaded = true;
         }
     }
@@ -137,16 +180,29 @@ impl HanNomTranslator {
     // --- Options ---
 
     pub(crate) fn set_hannom_options(&mut self, options: &HC_HanNomOptions) {
+        // Frontends re-apply the same options routinely (macOS calls
+        // `configureHanNom()` on every controller init and on every settings
+        // change). This used to clear `phrase_history_loaded` unconditionally
+        // while leaving `phrase_history_dirty` set, so the next keystroke
+        // reloaded a history that did not contain anything learned since the
+        // last flush, and the next flush wrote that stale copy back over the
+        // file — `{"entries":[]}` in the common case (NOM-08).
+        //
+        // Two rules keep that from happening: anything learned under the
+        // current settings reaches disk before they change, and only a genuine
+        // change of path invalidates the in-memory history.
+        self.flush_hannom_learning();
         self.phrase_prediction_enabled = options.phrase_prediction != 0;
         self.phrase_learning_enabled = options.learning_enabled != 0;
         if !options.history_path.is_null() {
-            if let Some(path) = key_text(options.history_path) {
-                if !path.is_empty() {
-                    self.phrase_history_path = PathBuf::from(path);
+            if let Some(path) = key_text(options.history_path).filter(|path| !path.is_empty()) {
+                let path = PathBuf::from(path);
+                if path != self.phrase_history_path {
+                    self.phrase_history_path = path;
+                    self.phrase_history_loaded = false;
                 }
             }
         }
-        self.phrase_history_loaded = false;
     }
 
     pub(crate) fn set_hannom_options_v2(&mut self, options: &HC_HanNomOptionsV2) {
@@ -181,22 +237,35 @@ impl HanNomTranslator {
         }
     }
 
+    /// Appends the single-glyph candidates for one syllable. Shared by the
+    /// no-first-word path, the empty-phrase fallback and the punctuation commit
+    /// so all three rank identically.
+    fn push_single_glyph_candidates(&mut self, reading: &str, limit: usize) {
+        let Ok(chars) = get_global_dict() else {
+            return;
+        };
+        for (rank, ch) in chars.lookup(reading).into_iter().take(limit).enumerate() {
+            self.phrase_candidates.push(NomTextCandidate {
+                text: ch.to_string(),
+                reading: reading.to_owned(),
+                kind: 3,
+                system_rank: rank as u32,
+                source_tier: 1,
+            });
+        }
+    }
+
     pub(crate) fn rebuild_phrase_candidates(&mut self, composition: &CompositionEngine) {
+        #[cfg(test)]
+        crate::han_nom::probe::note_phrase_rebuild();
         self.phrase_candidates.clear();
         let Ok(chars) = get_global_dict() else {
             return;
         };
         let full = self.phrase_reading(composition);
         if self.phrase_first.is_none() {
-            for (rank, ch) in chars.lookup(&composition.buffer).into_iter().enumerate() {
-                self.phrase_candidates.push(NomTextCandidate {
-                    text: ch.to_string(),
-                    reading: composition.buffer.clone(),
-                    kind: 3,
-                    system_rank: rank as u32,
-                    source_tier: 1,
-                });
-            }
+            let reading = composition.buffer.clone();
+            self.push_single_glyph_candidates(&reading, usize::MAX);
             self.sort_phrase_candidates();
             return;
         }
@@ -261,43 +330,59 @@ impl HanNomTranslator {
 
         // Fallback: when phrase candidates are empty after space, offer single-char Nom lookup
         if self.phrase_candidates.is_empty() && self.phrase_first.is_some() {
-            let first = self.phrase_first.as_deref().unwrap_or_default();
-            for (rank, ch) in chars.lookup(first).into_iter().take(9).enumerate() {
-                self.phrase_candidates.push(NomTextCandidate {
-                    text: ch.to_string(),
-                    reading: first.to_string(),
-                    kind: 3,
-                    system_rank: rank as u32,
-                    source_tier: 1,
-                });
-            }
+            let first = self.phrase_first.clone().unwrap_or_default();
+            self.push_single_glyph_candidates(&first, GENERATED_PAIR_WIDTH);
         }
+        self.sort_phrase_candidates();
+    }
+
+    /// Replaces the candidate list with the single glyphs of the first word.
+    ///
+    /// Used when the phrase is committed with nothing typed for the second
+    /// syllable, where every phrase candidate is a *prediction*.
+    fn rebuild_first_word_candidates(&mut self) {
+        #[cfg(test)]
+        crate::han_nom::probe::note_phrase_rebuild();
+        self.phrase_candidates.clear();
+        let first = self.phrase_first.clone().unwrap_or_default();
+        self.push_single_glyph_candidates(&first, usize::MAX);
         self.sort_phrase_candidates();
     }
 
     fn sort_phrase_candidates(&mut self) {
         self.ensure_phrase_history_loaded();
-        self.phrase_candidates.sort_by(|left, right| {
-            let class = left.kind.cmp(&right.kind);
-            if class != std::cmp::Ordering::Equal {
-                return class;
-            }
-            let (lc, lt) = if self.phrase_learning_enabled {
-                self.phrase_history.score(&left.reading, &left.text)
-            } else {
-                (0, 0)
-            };
-            let (rc, rt) = if self.phrase_learning_enabled {
-                self.phrase_history.score(&right.reading, &right.text)
-            } else {
-                (0, 0)
-            };
-            rc.cmp(&lc)
-                .then_with(|| rt.cmp(&lt))
+        // Decorate-sort-undecorate. The comparator used to call
+        // `PhraseHistory::score` twice per comparison — O(n log n) linear scans
+        // of a list bounded only by the 2,048-entry learning cap, which put a
+        // 1,400-candidate keystroke at 11.2 ms (NOM-12). Scoring once per
+        // candidate makes it O(n) scans.
+        let learning = self.phrase_learning_enabled;
+        let history = &self.phrase_history;
+        let mut ranked: Vec<(u32, u64, NomTextCandidate)> =
+            std::mem::take(&mut self.phrase_candidates)
+                .into_iter()
+                .map(|candidate| {
+                    let (count, last_used) = if learning {
+                        history.score(&candidate.reading, &candidate.text)
+                    } else {
+                        (0, 0)
+                    };
+                    (count, last_used, candidate)
+                })
+                .collect();
+        ranked.sort_by(|(lc, lt, left), (rc, rt, right)| {
+            left.kind
+                .cmp(&right.kind)
+                .then_with(|| rc.cmp(lc))
+                .then_with(|| rt.cmp(lt))
                 .then_with(|| left.source_tier.cmp(&right.source_tier))
                 .then_with(|| left.system_rank.cmp(&right.system_rank))
                 .then_with(|| left.text.cmp(&right.text))
         });
+        self.phrase_candidates = ranked
+            .into_iter()
+            .map(|(_, _, candidate)| candidate)
+            .collect();
         // Not `dedup_by`: that only removes *adjacent* duplicates, and the
         // same glyph pair can arrive from both the phrase dictionary and the
         // generated cross product, sorting far apart once their kinds differ.
@@ -325,22 +410,57 @@ impl HanNomTranslator {
         result.handled = handled;
         let start = self.phrase_candidate_page * 9;
         let end = (start + 9).min(self.phrase_candidates.len());
-        self.ffi_phrase_candidates_buf.clear();
+        self.publish_candidates(start, end);
+        result.candidates = self.published_candidates_ptr();
+        result.candidate_count = self.ffi_phrase_candidates_buf.len() as u16;
+    }
+
+    /// Copies `phrase_candidates[start..end]` into the arena and rebuilds the
+    /// FFI pointer table from it.
+    ///
+    /// Copying rather than borrowing is the point: the pointers handed to the
+    /// caller must not die when `reset()` drops `phrase_candidates`, which
+    /// happens on every commit, on every `hc_session_select_hannom_candidate_*`
+    /// and on `hc_session_reset` — none of which publish a replacement the
+    /// caller could move to (FFI-06).
+    fn publish_candidates(&mut self, start: usize, end: usize) {
+        self.ffi_candidate_arena.clear();
+        self.ffi_candidate_spans.clear();
         for candidate in &self.phrase_candidates[start..end] {
-            self.ffi_phrase_candidates_buf.push(HC_HanNomCandidateText {
-                text: candidate.text.as_ptr(),
-                text_len: candidate.text.len().min(u16::MAX as usize) as u16,
-                reading: candidate.reading.as_ptr(),
-                reading_len: candidate.reading.len().min(u16::MAX as usize) as u16,
+            let text = (self.ffi_candidate_arena.len(), candidate.text.len());
+            self.ffi_candidate_arena.push_str(&candidate.text);
+            let reading = (self.ffi_candidate_arena.len(), candidate.reading.len());
+            self.ffi_candidate_arena.push_str(&candidate.reading);
+            self.ffi_candidate_spans.push(PublishedSpan {
+                text,
+                reading,
                 kind: candidate.kind,
             });
         }
-        result.candidates = if self.ffi_phrase_candidates_buf.is_empty() {
+        // Second pass: the arena is complete, so it can no longer reallocate
+        // and pointers into it are stable for the lifetime of this generation.
+        let base = self.ffi_candidate_arena.as_ptr();
+        self.ffi_phrase_candidates_buf.clear();
+        self.ffi_phrase_candidates_buf
+            .reserve(self.ffi_candidate_spans.len());
+        for span in &self.ffi_candidate_spans {
+            self.ffi_phrase_candidates_buf.push(HC_HanNomCandidateText {
+                // SAFETY: both offsets index bytes just written to the arena.
+                text: unsafe { base.add(span.text.0) },
+                text_len: span.text.1.min(u16::MAX as usize) as u16,
+                reading: unsafe { base.add(span.reading.0) },
+                reading_len: span.reading.1.min(u16::MAX as usize) as u16,
+                kind: span.kind,
+            });
+        }
+    }
+
+    fn published_candidates_ptr(&self) -> *const HC_HanNomCandidateText {
+        if self.ffi_phrase_candidates_buf.is_empty() {
             ptr::null()
         } else {
             self.ffi_phrase_candidates_buf.as_ptr()
-        };
-        result.candidate_count = self.ffi_phrase_candidates_buf.len() as u16;
+        }
     }
 
     fn populate_nom_result_v3(
@@ -350,28 +470,25 @@ impl HanNomTranslator {
         handled: u8,
     ) {
         const MAX_CANDIDATES: usize = 256;
-        self.rebuild_phrase_candidates(composition);
-        self.reading_buffer = self.phrase_reading(composition);
-        self.ffi_phrase_candidates_buf.clear();
+        // No rebuild here. This is only ever reached from
+        // `handle_han_nom_key_v3`, and every path in `handle_han_nom_key_v2`
+        // that returns "handled, still composing" has already run
+        // `populate_nom_result_v2`, which rebuilds and sets `reading_buffer`.
+        // Rebuilding a second time and discarding the first result was ~50% of
+        // an 882 µs Hán Nôm keystroke (PERF-04). `debug_assert` pins the
+        // contract so a future v2 path that skips the populate is caught.
+        debug_assert_eq!(
+            self.reading_buffer,
+            self.phrase_reading(composition),
+            "populate_nom_result_v3 requires populate_nom_result_v2 to have run"
+        );
         let total = self.phrase_candidates.len();
-        for candidate in self.phrase_candidates.iter().take(MAX_CANDIDATES) {
-            self.ffi_phrase_candidates_buf.push(HC_HanNomCandidateText {
-                text: candidate.text.as_ptr(),
-                text_len: candidate.text.len().min(u16::MAX as usize) as u16,
-                reading: candidate.reading.as_ptr(),
-                reading_len: candidate.reading.len().min(u16::MAX as usize) as u16,
-                kind: candidate.kind,
-            });
-        }
+        self.publish_candidates(0, total.min(MAX_CANDIDATES));
         result.status_flag = HCStatusFlag::InProgress as i32;
         result.error_code = HCErrorCode::None as i32;
         result.reading = self.reading_buffer.as_ptr();
         result.reading_len = self.reading_buffer.len().min(u16::MAX as usize) as u16;
-        result.candidates = if self.ffi_phrase_candidates_buf.is_empty() {
-            ptr::null()
-        } else {
-            self.ffi_phrase_candidates_buf.as_ptr()
-        };
+        result.candidates = self.published_candidates_ptr();
         result.candidate_count = self.ffi_phrase_candidates_buf.len() as u16;
         result.total_candidate_count = total.min(u16::MAX as usize) as u16;
         result.page_size = 9;
@@ -406,15 +523,35 @@ impl HanNomTranslator {
     }
 
     pub(crate) fn flush_hannom_learning(&mut self) {
-        if self.phrase_history_dirty
-            && self.phrase_learning_enabled
-            && self
-                .phrase_history
-                .persist(&self.phrase_history_path)
-                .is_ok()
-        {
-            self.phrase_history_dirty = false;
+        if !self.phrase_history_dirty || !self.phrase_learning_enabled {
+            return;
         }
+        match self.phrase_history.persist(&self.phrase_history_path) {
+            Ok(()) => self.phrase_history_dirty = false,
+            Err(err) => {
+                // Keep the dirty flag set so the next flush retries; the entries
+                // are still in memory and a later flush (or session teardown) can
+                // save them. A silent failure here is how NOM-01 stayed invisible.
+                // `writeln!` rather than `eprintln!`: this runs under `extern "C"`
+                // (hc_session_free / hc_session_flush_hannom_learning) and a panic
+                // on a closed stderr must not cross the FFI boundary.
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[HC_IME] failed to persist Hán Nôm learning to {}: {err}",
+                    self.phrase_history_path.display()
+                );
+            }
+        }
+    }
+
+    /// True while this engine owns some composition state — a reading, a raw
+    /// buffer, or a first word waiting for its partner. When it is false the
+    /// engine has nothing to act on and editing keys belong to the client.
+    fn is_composing(&self, composition: &CompositionEngine) -> bool {
+        !composition.buffer.is_empty()
+            || !composition.raw_buffer.is_empty()
+            || self.phrase_first.is_some()
     }
 
     // --- V2 key handler ---
@@ -424,6 +561,18 @@ impl HanNomTranslator {
         composition: &mut CompositionEngine,
         request: &HC_KeyRequest,
         result: &mut HC_HanNomResultV2,
+    ) -> i32 {
+        // The v2 result carries one nine-wide page, so `=`/`+`/`]` and `-`/`[`
+        // are the only way a v2 client can reach the rest of the list.
+        self.handle_han_nom_key_v2_inner(composition, request, result, true)
+    }
+
+    fn handle_han_nom_key_v2_inner(
+        &mut self,
+        composition: &mut CompositionEngine,
+        request: &HC_KeyRequest,
+        result: &mut HC_HanNomResultV2,
+        core_paging: bool,
     ) -> i32 {
         self.ffi_v2_output.clear();
         *result = HC_HanNomResultV2 {
@@ -448,6 +597,15 @@ impl HanNomTranslator {
         let text = key_text(request.text).unwrap_or("");
         match kind {
             HCKeyKind::Escape => {
+                if !self.is_composing(composition) {
+                    // Nothing to cancel, so the key is the application's:
+                    // dismissing a dialog, leaving vim insert mode. Every path
+                    // here used to return 1 and Escape never reached the app
+                    // in Hán Nôm mode (NOM-06). Vietnamese and the Hán Nôm
+                    // backspace path both fall through here.
+                    result.handled = 0;
+                    return 0;
+                }
                 if self.phrase_first.is_some() && composition.buffer.is_empty() {
                     self.phrase_first = None;
                     self.phrase_candidate_page = 0;
@@ -516,23 +674,45 @@ impl HanNomTranslator {
             }
             HCKeyKind::Printable => {
                 let ch = text.chars().next().unwrap_or('\0');
-                if matches!(ch, '=' | ']' | '+') {
-                    self.rebuild_phrase_candidates(composition);
-                    if (self.phrase_candidate_page + 1) * 9 < self.phrase_candidates.len() {
-                        self.phrase_candidate_page += 1;
+                if is_pager_key(ch) {
+                    // These are ordinary characters — `1+1=2`, `a[0]` — and the
+                    // engine may only take them when it has a candidate list to
+                    // page. It used to take them unconditionally: on a fresh
+                    // session all five returned handled with no state change,
+                    // and on the shipping v3/v4 path they did nothing at all
+                    // because `populate_nom_result_v3` ignores
+                    // `phrase_candidate_page` and always starts at index 0
+                    // (NOM-07). v3 hands the frontend the whole list and every
+                    // frontend pages in its own candidate UI, so core paging is
+                    // v2-only.
+                    if !core_paging || !self.is_composing(composition) {
+                        result.handled = 0;
+                        return 0;
                     }
-                    self.populate_nom_result_v2(composition, result, 1);
-                    return 1;
-                }
-                if matches!(ch, '-' | '[') {
-                    self.phrase_candidate_page = self.phrase_candidate_page.saturating_sub(1);
+                    self.rebuild_phrase_candidates(composition);
+                    if matches!(ch, '=' | ']' | '+') {
+                        if (self.phrase_candidate_page + 1) * 9 < self.phrase_candidates.len() {
+                            self.phrase_candidate_page += 1;
+                        }
+                    } else {
+                        self.phrase_candidate_page = self.phrase_candidate_page.saturating_sub(1);
+                    }
                     self.populate_nom_result_v2(composition, result, 1);
                     return 1;
                 }
                 self.phrase_candidate_page = 0;
                 if is_nom_punctuation(ch) && self.phrase_first.is_some() {
-                    self.rebuild_phrase_candidates(composition);
                     let reading = normalize_phrase_reading(&self.phrase_reading(composition));
+                    if composition.buffer.is_empty() {
+                        // Nothing was typed for the second syllable, so every
+                        // phrase candidate is a *prediction*. Committing the
+                        // top one inserted a whole word the user never typed —
+                        // `hai` Space `(` produced `𠄩𤖸(` — and learned it as
+                        // a selection (NOM-09). Only the first word is real.
+                        self.rebuild_first_word_candidates();
+                    } else {
+                        self.rebuild_phrase_candidates(composition);
+                    }
                     let output = self
                         .phrase_candidates
                         .first()
@@ -564,7 +744,7 @@ impl HanNomTranslator {
                     result.handled = 0;
                     return 0;
                 }
-                if composition.raw_buffer.len() < 64 {
+                if composition.raw_buffer.len() + text.len() <= MAX_READING_BYTES {
                     composition.raw_buffer.push_str(text);
                     composition.render_from_raw();
                 }
@@ -622,7 +802,7 @@ impl HanNomTranslator {
             candidate_count: 0,
             handled: 0,
         };
-        let handled = self.handle_han_nom_key_v2(composition, request, &mut v2);
+        let handled = self.handle_han_nom_key_v2_inner(composition, request, &mut v2, false);
         if handled == 0 {
             return 0;
         }
@@ -881,7 +1061,7 @@ impl HanNomTranslator {
                     }
                 }
 
-                if composition.raw_buffer.len() < 64 {
+                if composition.raw_buffer.len() + text.len() <= MAX_READING_BYTES {
                     composition.raw_buffer.push_str(text);
                     composition.render_from_raw();
                 }
@@ -1044,6 +1224,13 @@ fn key_text(ptr: *const c_char) -> Option<&'static str> {
         return None;
     }
     unsafe { std::ffi::CStr::from_ptr(ptr).to_str().ok() }
+}
+
+/// Candidate-page navigation on the v2 result. `-` and `]` normally reach the
+/// core as `HCKeyKind::Boundary`, not `Printable`; they are listed for the
+/// clients that do send them as text.
+fn is_pager_key(ch: char) -> bool {
+    matches!(ch, '=' | ']' | '+' | '-' | '[')
 }
 
 fn is_nom_punctuation(ch: char) -> bool {

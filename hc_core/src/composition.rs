@@ -4,8 +4,9 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
 
 use crate::compose::TypingEngine;
-use crate::language::{is_viqr_trigger, language_scores};
+use crate::language::{english_protection_restores_raw, is_viqr_trigger, language_scores};
 use crate::quick_consonants;
+use crate::transform::normalize_uo_nucleus;
 use crate::types::{
     CommitDecision, EnglishProtectionLevel, HCSpellCheckStatus, HCStatusFlag, HC_State, InputMode,
 };
@@ -43,12 +44,15 @@ pub struct CompositionEngine {
     pub english_protection: EnglishProtectionLevel,
     pub macro_in_english: bool,
     pub esc_restore_raw: bool,
-    pub committed_raw_history: Vec<String>,
     pub quick_consonant_lock: usize,
 }
 
 impl CompositionEngine {
     pub fn new(mode: InputMode, legacy_tone: bool) -> Self {
+        // Session construction is a sanctioned load point (AGENTS.md invariant
+        // 3); starting the word lists here keeps the parse off the typing path
+        // entirely instead of paying for the thread spawn on keystroke #1.
+        crate::language::prewarm_dictionaries();
         Self {
             mode,
             legacy_tone,
@@ -70,7 +74,6 @@ impl CompositionEngine {
             english_protection: EnglishProtectionLevel::Off,
             macro_in_english: false,
             esc_restore_raw: false,
-            committed_raw_history: Vec::new(),
             quick_consonant_lock: 0,
         }
     }
@@ -109,6 +112,7 @@ impl CompositionEngine {
         if self.quick_consonants_enabled {
             self.apply_quick_consonants();
         }
+        normalize_uo_nucleus(&mut self.buffer);
         TypingEngine::mirror_raw_casing(&self.raw_buffer, &mut self.buffer);
         self.rendered_raw_len = self.raw_buffer.len();
         self.update_spell_check_status();
@@ -133,6 +137,7 @@ impl CompositionEngine {
                 &mut self.quick_consonant_lock,
             );
             self.buffer = TypingEngine::render_raw(&self.raw_buffer, self.mode, self.legacy_tone);
+            normalize_uo_nucleus(&mut self.buffer);
         }
     }
 
@@ -150,17 +155,7 @@ impl CompositionEngine {
 
         let scores = language_scores(&raw, &self.buffer, self.mode, self.spell_check);
 
-        if self.english_protection == EnglishProtectionLevel::Hard
-            && crate::language::is_hard_english_raw_start(&raw)
-        {
-            self.last_spell_check_status = HCSpellCheckStatus::EnglishFallback;
-            return;
-        }
-        if matches!(
-            self.english_protection,
-            EnglishProtectionLevel::Hard | EnglishProtectionLevel::Soft
-        ) && crate::language::is_soft_english_pattern(&raw)
-        {
+        if english_protection_restores_raw(&raw, &self.buffer, self.english_protection) {
             self.last_spell_check_status = HCSpellCheckStatus::EnglishFallback;
             return;
         }
@@ -207,7 +202,6 @@ impl CompositionEngine {
                     true
                 };
             if should_expand {
-                self.committed_raw_history.push(raw.trim().to_string());
                 self.last_commit = expansion.clone();
                 self.last_raw = raw.trim().to_string();
                 self.reconversion_active = false;
@@ -231,9 +225,9 @@ impl CompositionEngine {
             self.mode,
             self.spell_check,
             self.auto_restore,
+            self.english_protection,
         );
 
-        self.committed_raw_history.push(raw.trim().to_string());
         self.last_commit = decision.text.clone();
         self.last_raw = raw.trim().to_string();
         self.reconversion_active = false;
@@ -325,6 +319,13 @@ impl CompositionEngine {
     }
 }
 
+/// Renders a keystroke sequence exactly as the trigger table does.
+///
+/// Deliberately *without* `normalize_uo_nucleus`: this is the probe the VNI
+/// visible-backspace search uses to find which raw subset reproduces a target
+/// string, and that search needs the plain keystroke→text mapping. The
+/// orthographic pass belongs to the engine's own buffer (`render_from_raw`),
+/// which is what the user sees.
 pub fn render_raw_input(raw: &str, mode: InputMode, legacy_tone: bool) -> String {
     TypingEngine::render_raw(raw, mode, legacy_tone)
 }
@@ -339,6 +340,7 @@ pub fn resolve_commit_text(
     mode: InputMode,
     spell_check: bool,
     auto_restore: bool,
+    english_protection: EnglishProtectionLevel,
 ) -> CommitDecision {
     let raw = raw.trim();
     let rendered = rendered.trim();
@@ -346,6 +348,17 @@ pub fn resolve_commit_text(
         return CommitDecision {
             text: String::new(),
             status: HCStatusFlag::Commit,
+        };
+    }
+
+    // English protection is an explicit user instruction, not a heuristic, so it
+    // outranks both the language scores and `auto_restore` — the same predicate
+    // already tints the preedit in `update_spell_check_status`, and the commit
+    // must agree with what the user was shown. `Off` (the default) is inert.
+    if english_protection_restores_raw(raw, english_protection) {
+        return CommitDecision {
+            text: raw.to_string(),
+            status: HCStatusFlag::EnglishFallback,
         };
     }
 

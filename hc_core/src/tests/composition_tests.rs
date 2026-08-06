@@ -888,17 +888,19 @@ fn backspace_deletes_visible_char_in_vni_mode() {
     let back = hc_session_handle_key(session, &req);
     assert_eq!(read_and_free(back.state), "phươn");
 
-    // Second backspace deletes 'n'
+    // Second backspace deletes 'n'. Losing the coda re-opens the syllable, and
+    // an open nucleus is spelled "uơ" — "phươ" is not a Vietnamese spelling
+    // (VI-05), so the horn leaves the u. Still exactly one visible character.
     req.kind = HCKeyKind::Backspace as i32;
     req.text = ptr::null();
     let back = hc_session_handle_key(session, &req);
-    assert_eq!(read_and_free(back.state), "phươ");
+    assert_eq!(read_and_free(back.state), "phuơ");
 
     // Third backspace deletes 'ơ'
     req.kind = HCKeyKind::Backspace as i32;
     req.text = ptr::null();
     let back = hc_session_handle_key(session, &req);
-    assert_eq!(read_and_free(back.state), "phư");
+    assert_eq!(read_and_free(back.state), "phu");
 
     // Fourth backspace deletes 'ư' (and its orphaned trigger)
     req.kind = HCKeyKind::Backspace as i32;
@@ -916,15 +918,17 @@ fn backspace_deletes_visible_char_in_vni_mode() {
     let back = hc_session_handle_key(session, &req);
     assert_eq!(read_and_free(back.state), "phưởn");
 
+    // "phưở" would be an open "ươ", which Vietnamese does not spell; see the
+    // "phuơ" step above.
     req.kind = HCKeyKind::Backspace as i32;
     req.text = ptr::null();
     let back = hc_session_handle_key(session, &req);
-    assert_eq!(read_and_free(back.state), "phưở");
+    assert_eq!(read_and_free(back.state), "phuở");
 
     req.kind = HCKeyKind::Backspace as i32;
     req.text = ptr::null();
     let back = hc_session_handle_key(session, &req);
-    assert_eq!(read_and_free(back.state), "phư");
+    assert_eq!(read_and_free(back.state), "phu");
 
     req.kind = HCKeyKind::Backspace as i32;
     req.text = ptr::null();
@@ -942,12 +946,12 @@ fn backspace_deletes_visible_char_in_vni_mode() {
     req.kind = HCKeyKind::Backspace as i32;
     req.text = ptr::null();
     let back = hc_session_handle_key(session, &req);
-    assert_eq!(read_and_free(back.state), "phưở");
+    assert_eq!(read_and_free(back.state), "phuở");
 
     req.kind = HCKeyKind::Backspace as i32;
     req.text = ptr::null();
     let back = hc_session_handle_key(session, &req);
-    assert_eq!(read_and_free(back.state), "phư");
+    assert_eq!(read_and_free(back.state), "phu");
 
     hc_session_free(session);
 }
@@ -1201,20 +1205,22 @@ fn tone_placement_on_uo_ue_uy_clusters() {
     assert_eq!(type_raw(session, &mut req, "thuaanf"), "thuần");
     hc_session_reset(session);
 
-    // "túy" - tone on u (first vowel in uy cluster), not y
-    assert_eq!(type_raw(session, &mut req, "tuys"), "túy");
+    // An OPEN "uy" is the one cluster where the two Vietnamese conventions
+    // disagree, so it follows `legacy_tone`. This session is the default
+    // (legacy_tone = 0 = "kiểu mới"), which tones the last vowel — the same
+    // convention that already produced "hoà" and "khoẻ" here. The old style
+    // ("túy", "thùy", "tủy") is asserted by `legacy_tone_uses_old_style`.
+    assert_eq!(type_raw(session, &mut req, "tuys"), "tuý");
     hc_session_reset(session);
 
-    // "thùy" - tone on u in "uy" cluster
-    assert_eq!(type_raw(session, &mut req, "thuyf"), "thùy");
+    assert_eq!(type_raw(session, &mut req, "thuyf"), "thuỳ");
     hc_session_reset(session);
 
-    // "huỳnh" - tone on u in "uy" cluster with coda
+    // A CLOSED "uy" is spelled the same in both conventions: tone on the y.
     assert_eq!(type_raw(session, &mut req, "huynhf"), "huỳnh");
     hc_session_reset(session);
 
-    // "tủy" - tone on u in "uy" with coda
-    assert_eq!(type_raw(session, &mut req, "tuyr"), "tủy");
+    assert_eq!(type_raw(session, &mut req, "tuyr"), "tuỷ");
 
     hc_session_free(session);
 }
@@ -1507,7 +1513,11 @@ fn tone_edge_case_uy_no_coda() {
     let session = hc_session_new(InputMode::Telex as i32, 0);
     let mut req = key_request(InputMode::Telex);
     let result = type_raw(session, &mut req, "uys");
-    assert_eq!(result, "úy", "úy: tone should go on u without coda");
+    assert_eq!(
+        result, "uý",
+        "uý: an open uy follows the configured convention, and legacy_tone=0 is \
+         the new style (last vowel) — the same one that spells hoà and khoẻ"
+    );
     hc_session_free(session);
 }
 
@@ -1588,7 +1598,11 @@ fn vni_edge_case_uy_no_coda() {
     let session = hc_session_new(InputMode::Vni as i32, 0);
     let mut req = key_request(InputMode::Vni);
     let result = type_raw(session, &mut req, "uy1");
-    assert_eq!(result, "úy", "úy: tone should go on u without coda");
+    assert_eq!(
+        result, "uý",
+        "uý: an open uy follows the configured convention, and legacy_tone=0 is \
+         the new style (last vowel) — the same one that spells hoà and khoẻ"
+    );
     hc_session_free(session);
 }
 
@@ -1983,3 +1997,252 @@ fn vni_does_not_cross_contaminate_with_telex_triggers() {
 
     hc_session_free(session);
 }
+
+// ---------------------------------------------------------------------------
+// P2 regressions — QC_FINDINGS.md VI-03, VI-04/VI-06, VI-05, FFI-07, PERF-02
+// ---------------------------------------------------------------------------
+
+/// VI-03: `englishProtection` used to tint the preedit and nothing else, so
+/// `craws` committed as `crắ` at Off, Soft *and* Hard even though `cr` is one
+/// of the starts `is_hard_english_raw_start` explicitly blocks.
+#[test]
+fn english_protection_gates_the_commit_not_just_the_preedit() {
+    // Off is the default and must stay byte-identical: the language scores
+    // alone decide, and "craws" scores Vietnamese.
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    req.english_protection = 0;
+    for (word, expected) in [("craws", "crắ"), ("swims", "swím"), ("yates", "yaté")] {
+        hc_session_reset(session);
+        assert_eq!(type_raw(session, &mut req, word), expected);
+        let (committed, status) = commit_with_space(session, &mut req);
+        assert_eq!(committed, expected, "Off must not change today's behaviour");
+        assert_eq!(status, HCStatusFlag::Commit as i32);
+    }
+    hc_session_free(session);
+
+    // Hard restores the raw keystrokes for an impossible Vietnamese onset.
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    req.english_protection = 2;
+    for word in ["craws", "swims"] {
+        hc_session_reset(session);
+        type_raw(session, &mut req, word);
+        let (committed, status) = commit_with_space(session, &mut req);
+        assert_eq!(committed, word, "Hard protection must commit '{word}' raw");
+        assert_eq!(status, HCStatusFlag::EnglishFallback as i32);
+    }
+    hc_session_free(session);
+
+    // Soft only covers the y+vowel pattern, so "craws" still composes there.
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+    req.english_protection = 1;
+    type_raw(session, &mut req, "craws");
+    let (committed, _) = commit_with_space(session, &mut req);
+    assert_eq!(committed, "crắ", "Soft does not claim consonant clusters");
+
+    hc_session_reset(session);
+    type_raw(session, &mut req, "yates");
+    let (committed, status) = commit_with_space(session, &mut req);
+    assert_eq!(committed, "yates", "Soft protection covers y + vowel");
+    assert_eq!(status, HCStatusFlag::EnglishFallback as i32);
+    hc_session_free(session);
+}
+
+/// VI-04: `legacy_tone` short-circuited to the first vowel before any cluster
+/// analysis, so closed syllables came out as `hòang`/`tóan`/`ngọai`/`xóay` —
+/// misspellings in *both* Vietnamese conventions. Old style differs from new
+/// style only for an OPEN `oa`/`oe`/`uy`.
+#[test]
+fn legacy_tone_uses_old_style_without_misspelling_closed_syllables() {
+    let session = hc_session_new(InputMode::Telex as i32, 1);
+    let mut req = key_request(InputMode::Telex);
+    req.legacy_tone = 1;
+
+    // Closed syllables: identical in both conventions.
+    for (keys, expected) in [
+        ("hoangf", "hoàng"),
+        ("toans", "toán"),
+        ("ngoaij", "ngoại"),
+        ("xoays", "xoáy"),
+        ("huynhf", "huỳnh"),
+        ("quangr", "quảng"),
+    ] {
+        hc_session_reset(session);
+        assert_eq!(type_raw(session, &mut req, keys), expected, "{keys}");
+    }
+
+    // Open oa/oe/uy: this is what "kiểu cũ" actually means.
+    for (keys, expected) in [
+        ("hoaf", "hòa"),
+        ("khoer", "khỏe"),
+        ("thuyr", "thủy"),
+        ("tuys", "túy"),
+    ] {
+        hc_session_reset(session);
+        assert_eq!(type_raw(session, &mut req, keys), expected, "{keys}");
+    }
+
+    hc_session_free(session);
+}
+
+/// VI-06: the default (`legacy_tone = 0`) applied the new style to `oa`/`oe`
+/// but the old style to `uy`, producing the `hoà` + `thủy` mix that no
+/// mainstream IME emits. One convention has to cover all three.
+#[test]
+fn default_tone_style_is_consistent_across_oa_oe_and_uy() {
+    let session = hc_session_new(InputMode::Telex as i32, 0);
+    let mut req = key_request(InputMode::Telex);
+
+    for (keys, expected) in [
+        ("hoaf", "hoà"),
+        ("khoer", "khoẻ"),
+        ("thuyr", "thuỷ"),
+        ("tuys", "tuý"),
+    ] {
+        hc_session_reset(session);
+        assert_eq!(type_raw(session, &mut req, keys), expected, "{keys}");
+    }
+
+    // Closed syllables are convention-independent and must not move.
+    for (keys, expected) in [("hoangf", "hoàng"), ("huynhf", "huỳnh")] {
+        hc_session_reset(session);
+        assert_eq!(type_raw(session, &mut req, keys), expected, "{keys}");
+    }
+
+    hc_session_free(session);
+}
+
+/// VI-05: the horn was applied to every plain u and o in the buffer, with no
+/// `qu-` exclusion — `quowr` → `qưở` (`qư` is not a legal sequence), `ruouwj`
+/// → `rượư`, `uouws` → `ướư`, and the VNI toggle path spelled `hu7o7u7` as
+/// `hươư`.
+#[test]
+fn horn_applies_to_the_nucleus_only() {
+    let cases: [(InputMode, &[(&str, &str)]); 3] = [
+        (
+            InputMode::Telex,
+            &[
+                ("quowr", "quở"),
+                ("thuowr", "thuở"),
+                ("huow", "huơ"),
+                ("ruouwj", "rượu"),
+                ("uouws", "ướu"),
+                // The deliberate both-vowel horn must survive.
+                ("nguoiw", "ngươi"),
+                ("nguwowif", "người"),
+                ("thuongw", "thương"),
+                ("thuowng", "thương"),
+            ],
+        ),
+        (
+            InputMode::Vni,
+            &[
+                ("quo73", "quở"),
+                ("thuo73", "thuở"),
+                ("huo7", "huơ"),
+                ("uou71", "ướu"),
+                ("nguoi7", "ngươi"),
+                ("thu7o7ng", "thương"),
+                // The P0 toggle fix surfaced this bug as "hươư".
+                ("hu7o7u7", "hươu"),
+            ],
+        ),
+        (
+            InputMode::Viqr,
+            &[
+                ("quo+?", "quở"),
+                ("thuo+?", "thuở"),
+                ("huo+", "huơ"),
+                ("ruou+.", "rượu"),
+                ("uou+'", "ướu"),
+                ("nguoi+", "ngươi"),
+            ],
+        ),
+    ];
+
+    for (mode, expectations) in cases {
+        let session = hc_session_new(mode as i32, 0);
+        let mut req = key_request(mode);
+        for (keys, expected) in expectations {
+            hc_session_reset(session);
+            assert_eq!(
+                &type_raw(session, &mut req, keys),
+                expected,
+                "{mode:?}: {keys}"
+            );
+        }
+        hc_session_free(session);
+    }
+}
+
+/// FFI-07: `committed_raw_history` grew by the raw keystrokes of every commit,
+/// was never read anywhere in the crate, was not cleared by `reset()` and had
+/// no bound — ~31 B per commit, +30 MB per million.
+///
+/// The property is scale-free: two identical batches of commits must retain
+/// the same amount of state, so the second batch may not make the engine any
+/// bigger than the first did.
+#[test]
+fn committing_retains_no_per_commit_state() {
+    fn commit_batch(engine: &mut composition::CompositionEngine, count: usize) {
+        for _ in 0..count {
+            engine.raw_buffer.push_str("tieengs");
+            engine.render_from_raw();
+            let mut state = engine.commit_current();
+            hc_state_free(&mut state);
+        }
+    }
+
+    let mut engine = composition::CompositionEngine::new(InputMode::Telex, false);
+    commit_batch(&mut engine, 100);
+    let after_first_batch = format!("{engine:?}").len();
+    commit_batch(&mut engine, 900);
+    let after_second_batch = format!("{engine:?}").len();
+
+    assert!(
+        after_second_batch <= after_first_batch + 64,
+        "900 further commits grew the engine from {after_first_batch} to \
+         {after_second_batch} bytes of retained state",
+    );
+}
+
+/// PERF-02: `is_known_english_word` used to parse `/usr/share/dict/words`
+/// (2.49 MB, 235,976 lines) inline, so keystroke #1 cost 30–44 ms against
+/// ~10 µs for keystroke #2 — a violation of AGENTS.md invariant 3. And even
+/// once cached, every lookup rebuilt the search-path list.
+///
+/// Both are asserted as properties rather than wall-clock numbers: the parse
+/// must not happen on the calling thread, and a warm lookup must not rebuild
+/// the paths.
+#[test]
+fn dictionary_lookups_never_read_files_on_the_typing_path() {
+    // Touch the lookup path the way a keystroke does, then let the background
+    // load land and ask which thread actually did the parsing.
+    assert!(!language::is_known_english_word("zzzz-not-a-word"));
+    let loader = language::english_dictionary_load_thread();
+    assert_ne!(
+        loader,
+        std::thread::current().id(),
+        "the OS word list must not be parsed on the thread that types",
+    );
+
+    // Warm state: the search paths (a Vec<PathBuf> plus dirs::data_dir()) are
+    // built once per dictionary, not once per lookup. The probe words must miss
+    // the built-in tables, or the `||` short-circuits before the external
+    // dictionary is consulted at all.
+    assert!(!language::is_known_english_word("qwertzuiop"));
+    assert!(!language::is_dictionary_vietnamese_word("qwertzuiop"));
+    let paths_built = language::dictionary_path_queries();
+    for _ in 0..1_000 {
+        let _ = language::is_known_english_word("qwertzuiop");
+        let _ = language::is_dictionary_vietnamese_word("qwertzuiop");
+    }
+    assert_eq!(
+        language::dictionary_path_queries(),
+        paths_built,
+        "a cached lookup must not rebuild the dictionary search paths",
+    );
+}
+

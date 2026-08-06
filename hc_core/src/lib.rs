@@ -48,6 +48,179 @@ pub(crate) fn hc_session_test_set_last_commit_age(session: *mut std::ffi::c_void
 
 thread_local! {
     static UTF8_RESULT_BUFFER: RefCell<String> = const { RefCell::new(String::new()) };
+    /// Backing store for every pointer published in `HC_KeyResultV2`.
+    static V4_RESULT_BUFFER: RefCell<V4ResultBuffer> = RefCell::new(V4ResultBuffer::default());
+}
+
+/// Largest `text` payload accepted for one key event, in bytes.
+///
+/// A key event carries a single keystroke; both shipped frontends send at most
+/// four bytes. The ABI used to accept whatever a `const char*` could reach, and
+/// the raw-buffer render is O(n²), so one 1 MB "keystroke" never returned
+/// (FFI-08). Anything longer than this is rejected with
+/// `HCErrorCode::TextTooLong` before it can reach the composition engine.
+pub const HC_MAX_KEY_TEXT_BYTES: usize = 64;
+
+/// Where one candidate's bytes live inside [`V4ResultBuffer::arena`].
+#[derive(Clone, Copy, Default)]
+struct CandidateSpan {
+    text_offset: usize,
+    text_len: usize,
+    reading_offset: usize,
+    reading_len: usize,
+    kind: u8,
+}
+
+/// Owns the memory behind `HC_KeyResultV2::composition_string` and
+/// `HC_KeyResultV2::candidates`.
+///
+/// `hc_session_handle_key_v4` used to publish a thread-local pointer on the
+/// Vietnamese branch and a session-owned pointer on the Hán Nôm branch, so no
+/// single caller rule was correct for the same field (FFI-05), and
+/// `hc_session_reset` freed the candidate strings a caller still held (FFI-06).
+/// Both branches now copy into this thread-local buffer, giving the whole
+/// result struct one owner and one lifetime: valid until the next
+/// `hc_session_handle_key_v4` call on the same thread, and unaffected by
+/// `hc_session_reset` / `hc_session_free`.
+#[derive(Default)]
+struct V4ResultBuffer {
+    text: String,
+    arena: Vec<u8>,
+    spans: Vec<CandidateSpan>,
+    entries: Vec<HC_HanNomCandidateText>,
+}
+
+impl V4ResultBuffer {
+    fn set_text_from_state(&mut self, state: &HC_State) {
+        state_to_utf8_into(state, &mut self.text);
+    }
+
+    /// Copies UTF-8 bytes borrowed from session memory into the buffer.
+    ///
+    /// # Safety
+    /// `ptr` must be null or point to `len` readable bytes.
+    unsafe fn set_text_from_borrowed(&mut self, ptr: *const u8, len: usize) {
+        self.text.clear();
+        if ptr.is_null() || len == 0 {
+            return;
+        }
+        let bytes = std::slice::from_raw_parts(ptr, len);
+        match std::str::from_utf8(bytes) {
+            Ok(text) => self.text.push_str(text),
+            // A u16 length cut can split a codepoint (FFI-09). Publishing
+            // replacement characters is still valid UTF-8; publishing a broken
+            // tail is what makes the C side hard to reason about.
+            Err(_) => self.text.push_str(&String::from_utf8_lossy(bytes)),
+        }
+    }
+
+    /// Copies a borrowed candidate array — entries and the bytes they point at.
+    ///
+    /// # Safety
+    /// `src` must be null or point to `count` readable `HC_HanNomCandidateText`
+    /// entries whose own pointers are readable for their declared lengths.
+    unsafe fn set_candidates(&mut self, src: *const HC_HanNomCandidateText, count: u16) {
+        self.arena.clear();
+        self.spans.clear();
+        self.entries.clear();
+        if src.is_null() || count == 0 {
+            return;
+        }
+        for candidate in std::slice::from_raw_parts(src, count as usize) {
+            let (text_offset, text_len) = self.push_bytes(candidate.text, candidate.text_len);
+            let (reading_offset, reading_len) =
+                self.push_bytes(candidate.reading, candidate.reading_len);
+            self.spans.push(CandidateSpan {
+                text_offset,
+                text_len,
+                reading_offset,
+                reading_len,
+                kind: candidate.kind,
+            });
+        }
+        // The arena is complete, so its address is now stable for this call.
+        let base = self.arena.as_ptr();
+        let entries = &mut self.entries;
+        for span in &self.spans {
+            entries.push(HC_HanNomCandidateText {
+                text: if span.text_len == 0 {
+                    ptr::null()
+                } else {
+                    base.add(span.text_offset)
+                },
+                text_len: span.text_len as u16,
+                reading: if span.reading_len == 0 {
+                    ptr::null()
+                } else {
+                    base.add(span.reading_offset)
+                },
+                reading_len: span.reading_len as u16,
+                kind: span.kind,
+            });
+        }
+    }
+
+    /// # Safety
+    /// `ptr` must be null or point to `len` readable bytes.
+    unsafe fn push_bytes(&mut self, ptr: *const u8, len: u16) -> (usize, usize) {
+        let len = len as usize;
+        if ptr.is_null() || len == 0 {
+            return (self.arena.len(), 0);
+        }
+        let offset = self.arena.len();
+        self.arena
+            .extend_from_slice(std::slice::from_raw_parts(ptr, len));
+        (offset, len)
+    }
+
+    fn text_ptr(&self) -> *const u8 {
+        if self.text.is_empty() {
+            ptr::null()
+        } else {
+            self.text.as_ptr()
+        }
+    }
+
+    fn candidates_ptr(&self) -> *const HC_HanNomCandidateText {
+        if self.entries.is_empty() {
+            ptr::null()
+        } else {
+            self.entries.as_ptr()
+        }
+    }
+}
+
+/// A `HC_KeyResultV2` that carries only an error — every field initialised, no
+/// pointer published.
+fn v4_error_result(error: HCErrorCode) -> HC_KeyResultV2 {
+    HC_KeyResultV2 {
+        composition_string: ptr::null(),
+        composition_len: 0,
+        status_flag: HCStatusFlag::InProgress as i32,
+        error_code: error as i32,
+        spell_check_status: HCSpellCheckStatus::Valid as i32,
+        handled: 0,
+        candidates: ptr::null(),
+        candidate_count: 0,
+        total_candidate_count: 0,
+    }
+}
+
+/// Rejects a key event whose text exceeds [`HC_MAX_KEY_TEXT_BYTES`] (FFI-08).
+///
+/// The NUL scan is unavoidable — a `const char*` carries no length — but it is
+/// linear and cheap. The unbounded cost was in composing the text afterwards,
+/// so the length is checked before UTF-8 validation and before any push.
+fn check_key_text_len(ptr: *const c_char) -> Result<(), HCErrorCode> {
+    if ptr.is_null() {
+        return Ok(());
+    }
+    let len = unsafe { CStr::from_ptr(ptr) }.to_bytes().len();
+    if len > HC_MAX_KEY_TEXT_BYTES {
+        Err(HCErrorCode::TextTooLong)
+    } else {
+        Ok(())
+    }
 }
 
 impl Session {
@@ -61,6 +234,12 @@ impl Session {
                 }
             }
         };
+        if let Err(err) = check_key_text_len(request.text) {
+            return HC_KeyResult {
+                state: hc_error_state(err),
+                handled: 0,
+            };
+        }
         self.composition.legacy_tone = request.legacy_tone != 0;
         self.composition.spell_check = request.spell_check != 0;
         self.composition.auto_restore = request.auto_restore != 0;
@@ -353,6 +532,15 @@ fn candidate_if_matches(
         .then_some(candidate)
 }
 
+/// Creates a session, or returns NULL if `input_mode` is not a valid
+/// `HC_InputMode` (0–5). Every caller's `if (!session)` guard used to be
+/// unreachable because any value produced a Telex session (FFI-04).
+///
+/// Threading: a session is not internally synchronised. Two threads calling
+/// into the same session pointer is undefined behaviour and has been observed
+/// to fault inside the engine; separate sessions on separate threads are safe,
+/// and the global macro map and dictionaries are internally synchronised
+/// (FFI-02). See the threading contract in `hc_core_ffi.h`.
 #[no_mangle]
 pub extern "C" fn hc_session_new(input_mode: i32, legacy_tone: u8) -> *mut std::ffi::c_void {
     let mode = match InputMode::try_from(input_mode) {
@@ -376,6 +564,17 @@ pub extern "C" fn hc_session_free(session: *mut std::ffi::c_void) {
     }
 }
 
+/// Clears the composing state of `session`.
+///
+/// Invalidates every pointer previously published in an `HC_HanNomResult`,
+/// `HC_HanNomResultV2` or `HC_HanNomResultV3` for this session: the candidate
+/// strings are dropped here (FFI-06). The outer candidate array keeps its
+/// address because the vector's allocation is reused, so a cached array pointer
+/// looks valid while the text pointers inside it dangle — callers must copy the
+/// strings out before any other call on the session, as the header now states.
+///
+/// `HC_KeyResultV2` (`hc_session_handle_key_v4`) is *not* affected: that result
+/// is copied into a thread-local buffer owned by this library.
 #[no_mangle]
 pub extern "C" fn hc_session_reset(session: *mut std::ffi::c_void) {
     if session.is_null() {
@@ -479,17 +678,7 @@ pub extern "C" fn hc_session_handle_key_v4(
     if session.is_null() || request.is_null() || result.is_null() {
         if !result.is_null() {
             unsafe {
-                *result = HC_KeyResultV2 {
-                    composition_string: ptr::null(),
-                    composition_len: 0,
-                    status_flag: HCStatusFlag::InProgress as i32,
-                    error_code: HCErrorCode::NullPointer as i32,
-                    spell_check_status: HCSpellCheckStatus::Valid as i32,
-                    handled: 0,
-                    candidates: ptr::null(),
-                    candidate_count: 0,
-                    total_candidate_count: 0,
-                };
+                *result = v4_error_result(HCErrorCode::NullPointer);
             }
         }
         return 0;
@@ -499,19 +688,28 @@ pub extern "C" fn hc_session_handle_key_v4(
         let session = &mut *(session as *mut Session);
         let req = &*request;
 
-        let composition_method = req.composition_method;
         let is_han_nom = req.translation_target == TRANSLATION_TARGET_HAN_NOM;
 
-        let input_mode = if is_han_nom {
-            composition_method + 3
-        } else {
-            composition_method
+        // Validated before use: `composition_method + 3` accepted anything the
+        // caller sent, overflowed on i32::MAX (an abort in debug builds) and
+        // otherwise resolved to a silent Telex session (FFI-03).
+        let mode = match InputMode::from_composition_method(req.composition_method, is_han_nom) {
+            Ok(mode) => mode,
+            Err(err) => {
+                *result = v4_error_result(err);
+                return 0;
+            }
         };
+
+        if let Err(err) = check_key_text_len(req.text) {
+            *result = v4_error_result(err);
+            return 0;
+        }
 
         let key_request = HC_KeyRequest {
             kind: req.kind,
             text: req.text,
-            input_mode,
+            input_mode: mode as i32,
             legacy_tone: req.legacy_tone,
             spell_check: req.spell_check,
             auto_restore: req.auto_restore,
@@ -545,50 +743,47 @@ pub extern "C" fn hc_session_handle_key_v4(
                     let handled =
                         t.handle_han_nom_key_v3(composition, &key_request, &mut nom_result);
 
-                    *result = HC_KeyResultV2 {
-                        composition_string: nom_result.reading,
-                        composition_len: nom_result.reading_len as usize,
-                        status_flag: nom_result.status_flag,
-                        error_code: nom_result.error_code,
-                        spell_check_status: HCSpellCheckStatus::Valid as i32,
-                        handled: nom_result.handled,
-                        candidates: nom_result.candidates,
-                        candidate_count: nom_result.candidate_count,
-                        total_candidate_count: nom_result.total_candidate_count,
-                    };
+                    // The translator hands back pointers into its own buffers,
+                    // which `hc_session_reset` clears and `hc_session_free`
+                    // drops. Copy them out so the caller's rule is the same one
+                    // the Vietnamese branch below uses (FFI-05, FFI-06).
+                    *result = V4_RESULT_BUFFER.with(|buffer| {
+                        let mut buffer = buffer.borrow_mut();
+                        buffer.set_text_from_borrowed(
+                            nom_result.reading,
+                            nom_result.reading_len as usize,
+                        );
+                        buffer.set_candidates(nom_result.candidates, nom_result.candidate_count);
+                        HC_KeyResultV2 {
+                            composition_string: buffer.text_ptr(),
+                            composition_len: buffer.text.len(),
+                            status_flag: nom_result.status_flag,
+                            error_code: nom_result.error_code,
+                            spell_check_status: HCSpellCheckStatus::Valid as i32,
+                            handled: nom_result.handled,
+                            candidates: buffer.candidates_ptr(),
+                            candidate_count: buffer.entries.len() as u16,
+                            total_candidate_count: nom_result.total_candidate_count,
+                        }
+                    });
                     handled
                 }
                 None => {
-                    *result = HC_KeyResultV2 {
-                        composition_string: ptr::null(),
-                        composition_len: 0,
-                        status_flag: HCStatusFlag::InProgress as i32,
-                        error_code: HCErrorCode::InvalidInputMode as i32,
-                        spell_check_status: HCSpellCheckStatus::Valid as i32,
-                        handled: 0,
-                        candidates: ptr::null(),
-                        candidate_count: 0,
-                        total_candidate_count: 0,
-                    };
+                    *result = v4_error_result(HCErrorCode::InvalidInputMode);
                     0
                 }
             }
         } else {
             let key_result = session.handle_key(&key_request);
 
-            UTF8_RESULT_BUFFER.with(|buffer| {
+            V4_RESULT_BUFFER.with(|buffer| {
                 let mut buffer = buffer.borrow_mut();
-                state_to_utf8_into(&key_result.state, &mut buffer);
-
-                let comp_ptr = if buffer.is_empty() {
-                    ptr::null()
-                } else {
-                    buffer.as_ptr()
-                };
+                buffer.set_text_from_state(&key_result.state);
+                buffer.set_candidates(ptr::null(), 0);
 
                 *result = HC_KeyResultV2 {
-                    composition_string: comp_ptr,
-                    composition_len: buffer.len(),
+                    composition_string: buffer.text_ptr(),
+                    composition_len: buffer.text.len(),
                     status_flag: key_result.state.status_flag,
                     error_code: key_result.state.error_code,
                     spell_check_status: key_result.state.spell_check_status,
@@ -923,6 +1118,13 @@ pub extern "C" fn hc_session_handle_key_hannom(
         return 0;
     }
     unsafe {
+        if let Err(err) = check_key_text_len((*request).text) {
+            (*result).error_code = err as i32;
+            (*result).handled = 0;
+            return 0;
+        }
+    }
+    unsafe {
         let session = &mut *(session as *mut Session);
         let translator = session.translator.as_mut().and_then(|t| {
             t.as_any_mut()
@@ -949,6 +1151,13 @@ pub extern "C" fn hc_session_handle_key_hannom_v2(
 ) -> i32 {
     if session.is_null() || request.is_null() || result.is_null() {
         return 0;
+    }
+    unsafe {
+        if let Err(err) = check_key_text_len((*request).text) {
+            (*result).error_code = err as i32;
+            (*result).handled = 0;
+            return 0;
+        }
     }
     unsafe {
         let session = &mut *(session as *mut Session);
@@ -1020,6 +1229,13 @@ pub extern "C" fn hc_session_handle_key_hannom_v3(
 ) -> i32 {
     if session.is_null() || request.is_null() || result.is_null() {
         return 0;
+    }
+    unsafe {
+        if let Err(err) = check_key_text_len((*request).text) {
+            (*result).error_code = err as i32;
+            (*result).handled = 0;
+            return 0;
+        }
     }
     unsafe {
         let session = &mut *(session as *mut Session);

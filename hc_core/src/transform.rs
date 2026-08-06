@@ -300,24 +300,135 @@ pub fn apply_horn(buffer: &mut String) -> bool {
     true
 }
 
+/// True when `chars[idx]` is the `u` of the `qu-` initial. That `u` is part of
+/// the onset, not the nucleus, so it never takes a horn: `quo` + horn is `quơ`
+/// ("quở", "quơ"), never `qươ` — `qư` is not a legal Vietnamese sequence.
+fn is_qu_glide(chars: &[char], idx: usize) -> bool {
+    idx > 0 && matches!(chars[idx - 1], 'q' | 'Q') && base_char(chars[idx]) == 'u'
+}
+
+/// True when `chars[idx]` is a plain (unhorned) `u` or `o` that may take a horn.
+///
+/// A plain vowel sitting directly after an `ơ` is the offglide of the `ươ`
+/// diphthong ("hươu", "rượu", "ướu") and is never horned — horning it produces
+/// the impossible `ươư`.
+fn is_hornable(chars: &[char], idx: usize) -> bool {
+    if !matches!(
+        vowel_signature(chars[idx]),
+        Some((VowelFamily::PlainU | VowelFamily::PlainO, _, _))
+    ) {
+        return false;
+    }
+    if is_qu_glide(chars, idx) {
+        return false;
+    }
+    if idx > 0
+        && matches!(
+            vowel_signature(chars[idx - 1]),
+            Some((VowelFamily::HornO, _, _))
+        )
+    {
+        return false;
+    }
+    true
+}
+
+fn horn_in_place(chars: &mut [char], idx: usize) {
+    let replacement = match vowel_signature(chars[idx]) {
+        Some((VowelFamily::PlainU, uppercase, tone)) => {
+            compose_vowel(VowelFamily::HornU, uppercase, tone)
+        }
+        Some((VowelFamily::PlainO, uppercase, tone)) => {
+            compose_vowel(VowelFamily::HornO, uppercase, tone)
+        }
+        _ => return,
+    };
+    chars[idx] = replacement;
+}
+
+/// Applies the horn to the syllable nucleus.
+///
+/// This used to horn *every* plain u/o in the buffer, which spelled `quowr` as
+/// `qưở`, `ruouwj` as `rượư` and `uouws` as `ướư`. The horn belongs to at most
+/// the `ươ` diphthong: a contiguous plain `u`+`o` takes both horns
+/// (`thuong`+w → `thương`, `nguoi`+7 → `ngươi`, `ruou`+w → `rươu`), and
+/// otherwise only the last hornable vowel takes it. Everything else in the
+/// buffer — the `qu-` glide and the offglide after an `ơ` — is left alone.
+///
+/// Whether the pair is finally spelled `ươ` or `uơ` depends on the syllable
+/// shape, which is not known yet while typing; [`normalize_uo_nucleus`] settles
+/// that on every render.
 fn apply_horn_to_slice(chars: &mut [char]) -> bool {
-    let mut changed = false;
-    for ch in chars.iter_mut() {
-        let replacement = match vowel_signature(*ch) {
-            Some((VowelFamily::PlainU, uppercase, tone)) => {
-                Some(compose_vowel(VowelFamily::HornU, uppercase, tone))
-            }
-            Some((VowelFamily::PlainO, uppercase, tone)) => {
-                Some(compose_vowel(VowelFamily::HornO, uppercase, tone))
-            }
-            _ => None,
-        };
-        if let Some(replacement) = replacement {
-            *ch = replacement;
-            changed = true;
+    for idx in 0..chars.len().saturating_sub(1) {
+        let pair_is_uo = matches!(
+            vowel_signature(chars[idx]),
+            Some((VowelFamily::PlainU, _, _))
+        ) && matches!(
+            vowel_signature(chars[idx + 1]),
+            Some((VowelFamily::PlainO, _, _))
+        );
+        if pair_is_uo && is_hornable(chars, idx) {
+            horn_in_place(chars, idx);
+            horn_in_place(chars, idx + 1);
+            return true;
         }
     }
-    changed
+
+    for idx in (0..chars.len()).rev() {
+        if is_hornable(chars, idx) {
+            horn_in_place(chars, idx);
+            return true;
+        }
+    }
+    false
+}
+
+/// Spells the horned `u`+`o` nucleus according to the syllable shape.
+///
+/// Vietnamese writes the diphthong `ươ` whenever the syllable continues past it
+/// — with a coda (`thương`, `nước`) or an offglide (`tươi`, `rượu`, `người`) —
+/// and the open rime `uơ` when it does not (`huơ`, `thuở`, `quở`, `quơ`). The
+/// two are indistinguishable at the moment the horn key is pressed: `thuowr`
+/// and `thuowng` reach the horn with the identical buffer `thuo`. So the horn
+/// applies the diphthong and this pass, which runs after every render, moves
+/// the spelling in whichever direction the syllable has since revealed.
+///
+/// The `qu-` glide is excluded: its `u` is part of the onset, so `quơ`/`quơn`
+/// never becomes `qươ` — `qư` is not a legal Vietnamese sequence.
+pub fn normalize_uo_nucleus(buffer: &mut String) -> bool {
+    let mut chars: Vec<char> = buffer.chars().collect();
+    for idx in 0..chars.len().saturating_sub(1) {
+        if !matches!(
+            vowel_signature(chars[idx + 1]),
+            Some((VowelFamily::HornO, _, _))
+        ) || is_qu_glide(&chars, idx)
+        {
+            continue;
+        }
+        // Every attested `uơ`/`ươ` nucleus carries an onset (huơ, thuở, quở,
+        // thương, người). A bare syllable-initial pair is not a word in either
+        // spelling, so it is left exactly as typed rather than guessed at —
+        // which is also what keeps the `uu` quick-consonant expansion visible.
+        if idx == 0 {
+            continue;
+        }
+        let open = idx + 1 == chars.len() - 1;
+        let (family, uppercase, tone) = match vowel_signature(chars[idx]) {
+            // Closed: "thuơn" is not a spelling, "thươn" is.
+            Some((VowelFamily::PlainU, uppercase, tone)) if !open => {
+                (VowelFamily::HornU, uppercase, tone)
+            }
+            // Open: "thươ"/"phươ" are not spellings, "thuơ"/"phuơ" are.
+            Some((VowelFamily::HornU, uppercase, tone)) if open => {
+                (VowelFamily::PlainU, uppercase, tone)
+            }
+            _ => continue,
+        };
+        chars[idx] = compose_vowel(family, uppercase, tone);
+        *buffer = chars.into_iter().collect();
+        return true;
+    }
+    false
 }
 
 pub fn apply_breve(buffer: &mut String) -> bool {
@@ -432,6 +543,20 @@ pub fn apply_circumflex_vni_toggle(buffer: &mut String) -> bool {
 }
 
 pub fn apply_horn_vni_toggle(buffer: &mut String) -> bool {
+    // The horn key acts on plain u/o. While any of those is left the press is an
+    // *apply*, even if another vowel is already horned: that is how VNI spells
+    // "ươ" as u7 + o7 ("thu7o7ng" → thương). Only once there is nothing left to
+    // horn does a further press toggle the existing horns off.
+    let has_hornable = buffer.chars().any(|ch| {
+        matches!(
+            vowel_signature(ch),
+            Some((VowelFamily::PlainU | VowelFamily::PlainO, _, _))
+        )
+    });
+    if has_hornable {
+        return apply_horn(buffer);
+    }
+
     let mut chars: Vec<char> = buffer.chars().collect();
     let mut stripped = false;
     for idx in (0..chars.len()).rev() {
@@ -586,12 +711,18 @@ fn tone_target_index(chars: &[char], legacy_tone: bool) -> Option<usize> {
         }
     }
 
-    if legacy_tone {
-        return vowels.first().copied();
-    }
-
     let bases: String = vowels.iter().map(|&idx| base_char(chars[idx])).collect();
     let cluster = bases.as_str();
+
+    // `legacy_tone` selects the *style* ("kiểu cũ" vs "kiểu mới"), and the two
+    // styles differ for exactly one case: an OPEN `oa`/`oe`/`uy` syllable, where
+    // the old style tones the first vowel (hòa, khỏe, thủy) and the new style
+    // the last (hoà, khoẻ, thuỷ). Every closed syllable is spelled identically
+    // in both styles (hoàng, toán, ngoại, xoáy, huỳnh), so the flag must not be
+    // consulted before the cluster is known — doing so produced `hòang`/`tóan`,
+    // which are misspellings in *both* conventions.
+    let open_syllable = *vowels.last().unwrap() == chars.len() - 1;
+    let style_first = legacy_tone && open_syllable;
 
     match cluster {
         "eu" => return vowels.first().copied(),
@@ -599,16 +730,12 @@ fn tone_target_index(chars: &[char], legacy_tone: bool) -> Option<usize> {
         "ai" | "ao" | "au" | "ay" | "eo" | "ia" | "iu" | "oi" | "ua" | "ui" => {
             return vowels.first().copied();
         }
-        "oa" | "oe" => return vowels.last().copied(),
-        "uy" => {
-            // For "uy" cluster: tone on u when no coda, tone on y when there's a coda
-            let last_vowel_idx = *vowels.last().unwrap();
-            let has_coda = last_vowel_idx < chars.len() - 1;
-            if has_coda {
-                return vowels.last().copied();
+        "oa" | "oe" | "uy" => {
+            return if style_first {
+                vowels.first().copied()
             } else {
-                return vowels.first().copied();
-            }
+                vowels.last().copied()
+            };
         }
         "uo" | "uye" => return vowels.last().copied(),
         "oai" | "uai" | "uay" => return vowels.get(1).copied().or_else(|| vowels.last().copied()),

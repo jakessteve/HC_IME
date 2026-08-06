@@ -1,9 +1,12 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
-use crate::types::{ContextSegment, InputMode, LanguageScores, SegmentKind, Tone};
+use crate::types::{
+    ContextSegment, EnglishProtectionLevel, InputMode, LanguageScores, SegmentKind, Tone,
+};
 use crate::vowel::{has_vietnamese_mark, strip_marks_ascii_lower, vowel_signature};
 
 const SCORE_SPELLCHECK_VI: i32 = 3;
@@ -178,8 +181,37 @@ fn has_code_shape(raw: &str, mode: InputMode) -> bool {
 }
 
 pub fn is_known_english_word(word: &str) -> bool {
-    ENGLISH_WORDS.contains(&word)
-        || external_english_dictionary().is_some_and(|dictionary| dictionary.contains(word))
+    ENGLISH_WORDS.contains(&word) || english_dictionary().contains(word)
+}
+
+/// Decides whether the `englishProtection` setting must hand the raw keystrokes
+/// back instead of the composed text.
+///
+/// The preedit tint (`update_spell_check_status`) and the commit
+/// (`resolve_commit_text`) both route through here so the two can never
+/// disagree — before this existed the setting only tinted, and `craws` still
+/// committed as `crắ` at every level.
+///
+/// Both predicates below judge *raw keystrokes*, which cannot tell `yeeu` (the
+/// Telex spelling of `yêu`) from an English `y…` word. So a match is only
+/// honoured when the engine did **not** compose a well-formed Vietnamese
+/// syllable: protection exists to keep English out of the Vietnamese engine,
+/// never to break `yêu`, `yên`, `yết`, `yếu`. The English words the levels were
+/// added for are unaffected — `crắ`, `swím`, `yaté`, `yeá` are all
+/// phonotactically impossible, so they still restore.
+pub fn english_protection_restores_raw(
+    raw: &str,
+    rendered: &str,
+    level: EnglishProtectionLevel,
+) -> bool {
+    let matched = match level {
+        EnglishProtectionLevel::Off => false,
+        EnglishProtectionLevel::Soft => is_soft_english_pattern(raw),
+        EnglishProtectionLevel::Hard => {
+            is_hard_english_raw_start(raw) || is_soft_english_pattern(raw)
+        }
+    };
+    matched && !is_valid_vietnamese_word(rendered)
 }
 
 #[derive(Default)]
@@ -201,15 +233,140 @@ fn load_cached_dictionary(
     cache.dictionary.clone()
 }
 
-static EXTERNAL_ENGLISH_DICTIONARY: OnceLock<Mutex<DictionaryCache>> = OnceLock::new();
+#[derive(Default)]
+struct DictionaryState {
+    loaded: bool,
+    dictionary: Option<Arc<HashSet<String>>>,
+    #[cfg(test)]
+    load_thread: Option<std::thread::ThreadId>,
+}
 
-fn external_english_dictionary() -> Option<Arc<HashSet<String>>> {
-    let cache = EXTERNAL_ENGLISH_DICTIONARY.get_or_init(|| Mutex::new(DictionaryCache::default()));
-    load_cached_dictionary(
-        cache,
-        english_dictionary_paths(),
-        load_external_english_dictionary,
-    )
+/// A word list parsed on a background thread.
+///
+/// AGENTS.md invariant 3 forbids file I/O on the typing path. The OS word list
+/// is 2.5 MB / ~236k lines and parsing it inline cost the *first* keystroke
+/// ~33 ms against ~10 µs for the second. So [`Self::contains`] never reads a
+/// file: it schedules the parse once and answers from whatever snapshot has
+/// been published, which is "absent" until the loader thread finishes. An
+/// absent list is a state the engine already had to handle — it is exactly a
+/// machine with no `/usr/share/dict/words` installed — so the built-in
+/// `ENGLISH_WORDS`/`VIETNAMESE_WORDS` tables simply decide on their own until
+/// the snapshot lands.
+///
+/// The reload-on-path-change contract still lives in [`load_cached_dictionary`],
+/// which the loader thread calls; the lookup path no longer rebuilds the search
+/// list (a `Vec<PathBuf>` plus `dirs::data_dir()`, 1.13 µs) on every keystroke.
+struct BackgroundDictionary {
+    started: AtomicBool,
+    ready: AtomicBool,
+    state: Mutex<DictionaryState>,
+    published: Condvar,
+    cache: Mutex<DictionaryCache>,
+    paths: fn() -> Vec<PathBuf>,
+    loader: fn(&[PathBuf]) -> Option<HashSet<String>>,
+}
+
+impl BackgroundDictionary {
+    fn new(
+        paths: fn() -> Vec<PathBuf>,
+        loader: fn(&[PathBuf]) -> Option<HashSet<String>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            started: AtomicBool::new(false),
+            ready: AtomicBool::new(false),
+            state: Mutex::new(DictionaryState::default()),
+            published: Condvar::new(),
+            cache: Mutex::new(DictionaryCache::default()),
+            paths,
+            loader,
+        })
+    }
+
+    /// Schedules the parse. Returns false only when the thread could not be
+    /// spawned, in which case the caller must fall back to loading inline.
+    fn schedule(self: &Arc<Self>) -> bool {
+        if self.started.load(Ordering::Acquire) || self.started.swap(true, Ordering::AcqRel) {
+            return true;
+        }
+        let worker = Arc::clone(self);
+        match std::thread::Builder::new()
+            .name("hcime-dictionary".to_owned())
+            .spawn(move || worker.load())
+        {
+            Ok(_) => true,
+            Err(_) => {
+                self.started.store(false, Ordering::Release);
+                false
+            }
+        }
+    }
+
+    fn load(self: Arc<Self>) {
+        let paths = (self.paths)();
+        let dictionary = load_cached_dictionary(&self.cache, paths, self.loader);
+        let mut state = self.state.lock().unwrap();
+        state.dictionary = dictionary;
+        state.loaded = true;
+        #[cfg(test)]
+        {
+            state.load_thread = Some(std::thread::current().id());
+        }
+        self.ready.store(true, Ordering::Release);
+        drop(state);
+        self.published.notify_all();
+    }
+
+    /// Typing-path lookup: never blocks, never reads a file.
+    fn contains(self: &Arc<Self>, word: &str) -> bool {
+        if !self.ready.load(Ordering::Acquire) {
+            self.schedule();
+            return false;
+        }
+        let state = self.state.lock().unwrap();
+        state
+            .dictionary
+            .as_ref()
+            .is_some_and(|dictionary| dictionary.contains(word))
+    }
+
+    /// Waits for the parse to finish. **Not** for the typing path.
+    fn loaded(self: &Arc<Self>) -> Option<Arc<HashSet<String>>> {
+        if !self.schedule() {
+            Arc::clone(self).load();
+        }
+        let mut state = self.state.lock().unwrap();
+        while !state.loaded {
+            state = self.published.wait(state).unwrap();
+        }
+        state.dictionary.clone()
+    }
+}
+
+static ENGLISH_DICTIONARY: OnceLock<Arc<BackgroundDictionary>> = OnceLock::new();
+static VIETNAMESE_DICTIONARY: OnceLock<Arc<BackgroundDictionary>> = OnceLock::new();
+
+fn english_dictionary() -> &'static Arc<BackgroundDictionary> {
+    ENGLISH_DICTIONARY.get_or_init(|| {
+        BackgroundDictionary::new(english_dictionary_paths, load_external_english_dictionary)
+    })
+}
+
+fn vietnamese_dictionary() -> &'static Arc<BackgroundDictionary> {
+    VIETNAMESE_DICTIONARY.get_or_init(|| {
+        BackgroundDictionary::new(
+            vietnamese_dictionary_paths,
+            load_external_vietnamese_dictionary,
+        )
+    })
+}
+
+/// Starts both word-list loads without waiting for them.
+///
+/// Called from `CompositionEngine::new` — session construction is a sanctioned
+/// load point, so keystroke #1 pays neither the parse nor the thread spawn.
+pub fn prewarm_dictionaries() {
+    english_dictionary().schedule();
+    vietnamese_dictionary().schedule();
 }
 
 fn load_external_english_dictionary(paths: &[PathBuf]) -> Option<HashSet<String>> {
@@ -235,6 +392,7 @@ fn load_external_english_dictionary(paths: &[PathBuf]) -> Option<HashSet<String>
 }
 
 fn english_dictionary_paths() -> Vec<PathBuf> {
+    record_dictionary_path_query();
     let mut paths = Vec::new();
     if let Some(path) = std::env::var_os("HC_IME_EN_DICT") {
         paths.push(PathBuf::from(path));
@@ -788,24 +946,25 @@ const ENGLISH_WORDS: &[&str] = &[
 ];
 
 pub fn is_dictionary_vietnamese_word(word: &str) -> bool {
-    is_known_vietnamese_word(word)
-        || external_vietnamese_dictionary().is_some_and(|dictionary| dictionary.contains(word))
+    is_known_vietnamese_word(word) || vietnamese_dictionary().contains(word)
 }
 
 fn is_known_vietnamese_word(word: &str) -> bool {
     VIETNAMESE_WORDS.contains(&word)
 }
 
-static EXTERNAL_VIETNAMESE_DICTIONARY: OnceLock<Mutex<DictionaryCache>> = OnceLock::new();
-
+/// Returns the external Vietnamese word list, **waiting** for the background
+/// load if it has not finished. Not for the typing path — that is
+/// [`is_dictionary_vietnamese_word`], which never blocks.
+///
+/// Nothing inside the shipping library calls this (the engine only ever wants
+/// the non-blocking lookup); it is part of the rlib surface and is what the
+/// test suite uses to assert the word list really was picked up. A
+/// `cdylib`+`rlib` crate reports otherwise-unreachable `pub` items as dead
+/// code, hence the allow.
+#[allow(dead_code)]
 pub fn external_vietnamese_dictionary() -> Option<Arc<HashSet<String>>> {
-    let cache =
-        EXTERNAL_VIETNAMESE_DICTIONARY.get_or_init(|| Mutex::new(DictionaryCache::default()));
-    load_cached_dictionary(
-        cache,
-        vietnamese_dictionary_paths(),
-        load_external_vietnamese_dictionary,
-    )
+    vietnamese_dictionary().loaded()
 }
 
 fn load_external_vietnamese_dictionary(paths: &[PathBuf]) -> Option<HashSet<String>> {
@@ -828,6 +987,7 @@ fn load_external_vietnamese_dictionary(paths: &[PathBuf]) -> Option<HashSet<Stri
 }
 
 fn vietnamese_dictionary_paths() -> Vec<PathBuf> {
+    record_dictionary_path_query();
     let mut paths = Vec::new();
     if let Some(path) = std::env::var_os("HC_IME_VI_DICT") {
         paths.push(PathBuf::from(path));
@@ -963,6 +1123,46 @@ pub fn is_soft_english_pattern(raw: &str) -> bool {
 
 pub fn is_viqr_trigger(ch: char) -> bool {
     matches!(ch, '\'' | '`' | '?' | '~' | '.' | '^' | '+' | '(')
+}
+
+// ---------------------------------------------------------------------------
+// Test-only instrumentation for the PERF-02 invariants. Compiled out of the
+// shipping library; the counters exist so the regression test can assert the
+// *properties* ("the parse never runs on the caller's thread", "a cached lookup
+// does not rebuild the search paths") instead of a flaky wall-clock number.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+static DICTIONARY_PATH_QUERIES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+fn record_dictionary_path_query() {
+    DICTIONARY_PATH_QUERIES.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(not(test))]
+fn record_dictionary_path_query() {}
+
+/// Number of times a `*_dictionary_paths()` search list has been built.
+#[cfg(test)]
+pub(crate) fn dictionary_path_queries() -> usize {
+    DICTIONARY_PATH_QUERIES.load(Ordering::Relaxed)
+}
+
+/// Waits for the English word list to be published and reports which thread
+/// parsed it. Any answer other than the caller's own thread proves the read did
+/// not happen on the typing path.
+#[cfg(test)]
+pub(crate) fn english_dictionary_load_thread() -> std::thread::ThreadId {
+    let dictionary = english_dictionary();
+    let _ = dictionary.loaded();
+    dictionary
+        .state
+        .lock()
+        .unwrap()
+        .load_thread
+        .expect("a published dictionary always records the thread that parsed it")
 }
 
 #[cfg(test)]

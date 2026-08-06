@@ -217,6 +217,9 @@ pub enum HCErrorCode {
     InvalidEditTrigger = -6,
     MissingRequiredField = -7,
     EngineFailure = -8,
+    /// A key event carried more than `HC_MAX_KEY_TEXT_BYTES` of text. Additive
+    /// per ADR-003: existing codes keep their values.
+    TextTooLong = -9,
 }
 
 #[repr(i32)]
@@ -246,6 +249,9 @@ pub enum InputMode {
 impl TryFrom<i32> for InputMode {
     type Error = HCErrorCode;
 
+    /// Rejects anything outside 0–5. A silent fallback to `Telex` made every
+    /// `Err` arm on the FFI surface dead code and let `hc_session_new(99, 0)`
+    /// hand back a working session where the header promises NULL (FFI-04).
     fn try_from(value: i32) -> Result<Self, Self::Error> {
         Ok(match value {
             0 => InputMode::Telex,
@@ -254,7 +260,26 @@ impl TryFrom<i32> for InputMode {
             3 => InputMode::HanNomTelex,
             4 => InputMode::HanNomVni,
             5 => InputMode::HanNomViqr,
-            _ => InputMode::Telex,
+            _ => return Err(HCErrorCode::InvalidInputMode),
+        })
+    }
+}
+
+impl InputMode {
+    /// Resolves the `HC_KeyRequestV2` pair (`composition_method`,
+    /// `translation_target`) without arithmetic on unvalidated input.
+    ///
+    /// The previous `composition_method + 3` overflowed on `i32::MAX` — an
+    /// abort in debug builds, a wrapped negative mode in release (FFI-03).
+    pub fn from_composition_method(method: i32, han_nom: bool) -> Result<Self, HCErrorCode> {
+        Ok(match (method, han_nom) {
+            (0, false) => InputMode::Telex,
+            (1, false) => InputMode::Vni,
+            (2, false) => InputMode::Viqr,
+            (0, true) => InputMode::HanNomTelex,
+            (1, true) => InputMode::HanNomVni,
+            (2, true) => InputMode::HanNomViqr,
+            _ => return Err(HCErrorCode::InvalidInputMode),
         })
     }
 }
